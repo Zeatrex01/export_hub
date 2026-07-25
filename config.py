@@ -172,8 +172,13 @@ def sanitize_filename(name):
     return cleaned or "export"
 
 
-def resolve_filename(template, context, project, preset):
-    """Expand tokens in a filename template into a safe, extension-less filename."""
+def resolve_filename(template, context, project, preset, object_name=None):
+    """Expand tokens in a filename template into a safe, extension-less filename.
+
+    object_name overrides the {object} token. Exports that run on temporary
+    copies pass the original object's name, so files are named after what the
+    user sees in the outliner rather than after a throwaway "Cube.001".
+    """
     obj = context.active_object
     coll = context.collection
     scene = context.scene
@@ -187,7 +192,7 @@ def resolve_filename(template, context, project, preset):
         "project": project.name or "project",
         "preset": preset.name or "preset",
         "blend": blend or "untitled",
-        "object": obj.name if obj else "object",
+        "object": object_name or (obj.name if obj else "object"),
         "collection": coll.name if coll else "collection",
         "scene": scene.name if scene else "scene",
         "date": now.strftime("%Y-%m-%d"),

@@ -171,9 +171,15 @@ class EXH_ExportPreset(bpy.types.PropertyGroup):
         description="Bump the version number by one on every successful export",
     )
     apply_transform_before_export: BoolProperty(
-        name="Apply transforms before export",
+        name="Bake rotation & scale",
         default=False,
-        description="Apply Location/Rotation/Scale on selected objects before exporting",
+        description=(
+            "Apply rotation and scale for the exported file, on temporary copies that are "
+            "deleted afterwards — the objects in your scene are never modified. Location is "
+            "deliberately left alone: applying it would move each object's origin to the "
+            "world origin, so the engine would rotate the asset around a point away from "
+            "its geometry. Requires the Selected Objects export mode"
+        ),
     )
     open_folder_after_export: BoolProperty(name="Open folder after export", default=False)
     fbx_settings: PointerProperty(type=EXH_FBXSettings)

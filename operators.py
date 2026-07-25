@@ -3,6 +3,7 @@
 import os
 import json
 import datetime
+import contextlib
 
 import bpy
 from bpy.props import StringProperty, EnumProperty, IntProperty
@@ -50,7 +51,92 @@ def _record_history(context, project_name, preset_name, filepath, kwargs):
     prefs.active_history_index = 0
 
 
-def _resolve_target(context, project, preset):
+_COPY_MARKER = "_export_hub_source_index"
+
+
+@contextlib.contextmanager
+def _transformed_copies(context, originals):
+    """Yield {original: copy}, where each copy has its transforms applied.
+
+    Applying transforms to the real objects is destructive and the add-on cannot
+    put them back — the user asked for an export, not a permanent edit of their
+    scene. So the baking happens on duplicates that live only for the duration of
+    the export and are removed on the way out, including when it fails.
+
+    The set is duplicated in a single operation on purpose: duplicating object by
+    object would sever parenting and armature-modifier links between them, while
+    one duplicate call rewires those relationships inside the new set.
+    """
+    previous_active = context.view_layer.objects.active
+
+    # Duplicates inherit custom properties, and that is the only dependable way
+    # to tell which copy came from which original: duplicate() returns no
+    # mapping, and the generated names are not something to parse.
+    for index, obj in enumerate(originals):
+        obj[_COPY_MARKER] = index
+
+    mapping = {}
+    try:
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in originals:
+            obj.select_set(True)
+        context.view_layer.objects.active = originals[0]
+
+        bpy.ops.object.duplicate(linked=False)
+
+        for copy in list(context.selected_objects):
+            index = copy.get(_COPY_MARKER)
+            if index is None:
+                continue
+            del copy[_COPY_MARKER]
+            mapping[originals[index]] = copy
+
+        # transform_apply refuses on data shared with anything else.
+        try:
+            bpy.ops.object.make_single_user(object=True, obdata=True)
+        except RuntimeError:
+            pass
+
+        # Rotation and scale only — never location. Applying location moves the
+        # object's origin to the world origin and bakes the offset into the
+        # vertices. It looks identical in Blender, but the engine then has a
+        # mesh whose pivot sits at zero with its geometry somewhere else, so the
+        # prop rotates around a point it is nowhere near. The pivot is the
+        # artist's decision; this only cleans up what the engine cares about.
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+
+        yield mapping
+    finally:
+        for obj in originals:
+            if _COPY_MARKER in obj:
+                del obj[_COPY_MARKER]
+        for copy in mapping.values():
+            try:
+                bpy.data.objects.remove(copy, do_unlink=True)
+            except (ReferenceError, RuntimeError):
+                pass
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in originals:
+            try:
+                obj.select_set(True)
+            except (ReferenceError, RuntimeError):
+                pass
+        context.view_layer.objects.active = previous_active
+
+
+def _export_plan(context, mapping):
+    """[(object_to_export, name_to_use_in_filenames), ...].
+
+    With copies in play the object written to the FBX is a throwaway duplicate,
+    but the filename must still come from the original — nobody wants
+    `Chair.001.fbx`.
+    """
+    if mapping is None:
+        return [(obj, obj.name) for obj in context.selected_objects]
+    return [(copy, original.name) for original, copy in mapping.items()]
+
+
+def _resolve_target(context, project, preset, object_name=None):
     """Resolve a preset's absolute output path.
 
     Returns (export_dir, filepath, error). Both the export and the Export All
@@ -68,7 +154,8 @@ def _resolve_target(context, project, preset):
     if not export_dir:
         return None, None, "no export folder set"
 
-    filename = config.resolve_filename(preset.filename_template, context, project, preset) + ".fbx"
+    filename = config.resolve_filename(
+        preset.filename_template, context, project, preset, object_name=object_name) + ".fbx"
     return export_dir, os.path.join(export_dir, filename), None
 
 
@@ -113,9 +200,14 @@ def _export_fbx(context, filepath, kwargs):
     return True, filepath
 
 
-def _export_single(context, project, preset, kwargs):
+def _export_single(context, project, preset, kwargs, plan):
     """Export the whole export set to one file. Returns (ok, message, folder)."""
-    export_dir, filepath, error = _resolve_target(context, project, preset)
+    active = context.view_layer.objects.active
+    display = next((name for obj, name in plan if obj is active), None)
+    if display is None and plan:
+        display = plan[0][1]
+
+    export_dir, filepath, error = _resolve_target(context, project, preset, object_name=display)
     if error:
         return False, error, None
 
@@ -127,8 +219,8 @@ def _export_single(context, project, preset, kwargs):
     return True, filepath, export_dir
 
 
-def _export_per_object(context, project, preset, kwargs):
-    """Export every selected object to its own file. Returns (ok, message, folder).
+def _export_per_object(context, project, preset, kwargs, plan):
+    """Export every object in the plan to its own file. Returns (ok, message, folder).
 
     The selection is driven one object at a time and put back afterwards: the
     user pressed one button, they should get their scene back exactly as it was,
@@ -138,23 +230,24 @@ def _export_per_object(context, project, preset, kwargs):
         return False, ("split export needs {object} in the filename template, "
                        "otherwise every object writes to the same file"), None
 
-    originals = list(context.selected_objects)
-    original_active = context.view_layer.objects.active
+    was_selected = list(context.selected_objects)
+    was_active = context.view_layer.objects.active
 
     written, failed, folder = [], [], None
     try:
-        for obj in originals:
+        for obj, display in plan:
             bpy.ops.object.select_all(action='DESELECT')
             try:
                 obj.select_set(True)
             except RuntimeError:
                 # Hidden or excluded from the view layer; it cannot be exported
                 # on its own, and skipping quietly would be a lie.
-                failed.append("%s (not selectable in this view layer)" % obj.name)
+                failed.append("%s (not selectable in this view layer)" % display)
                 continue
             context.view_layer.objects.active = obj
 
-            export_dir, filepath, error = _resolve_target(context, project, preset)
+            export_dir, filepath, error = _resolve_target(
+                context, project, preset, object_name=display)
             if error:
                 return False, error, None
 
@@ -164,15 +257,15 @@ def _export_per_object(context, project, preset, kwargs):
                 folder = folder or export_dir
                 _record_history(context, project.name, preset.name, filepath, kwargs)
             else:
-                failed.append("%s (%s)" % (obj.name, message))
+                failed.append("%s (%s)" % (display, message))
     finally:
         bpy.ops.object.select_all(action='DESELECT')
-        for obj in originals:
+        for obj in was_selected:
             try:
                 obj.select_set(True)
-            except RuntimeError:
+            except (ReferenceError, RuntimeError):
                 pass
-        context.view_layer.objects.active = original_active
+        context.view_layer.objects.active = was_active
 
     if not written:
         return False, "no object exported — %s" % "; ".join(failed), None
@@ -188,22 +281,32 @@ def _run_export(context, project, preset):
     if fbx.use_selection and not context.selected_objects:
         return False, "%s: nothing selected" % preset.name
 
-    if preset.apply_transform_before_export and context.selected_objects:
-        try:
-            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-        except RuntimeError as exc:
-            # Object mode only, and it refuses on multi-user data. Reporting beats
-            # exporting something the user believes was transformed and was not.
-            return False, "%s: could not apply transforms (%s)" % (preset.name, exc)
-
     kwargs = {key: getattr(fbx, key) for key in FBX_SETTING_KEYS}
 
-    # Splitting only means anything when the export set is the selection; with
-    # "visible" or "active collection" there is no per-object set to walk.
-    if preset.split_per_object and fbx.use_selection:
-        ok, message, folder = _export_per_object(context, project, preset, kwargs)
-    else:
-        ok, message, folder = _export_single(context, project, preset, kwargs)
+    # Baking transforms means copying the export set, so it needs a selection to
+    # copy. With "visible" or "active collection" there is no such set.
+    on_copies = (preset.apply_transform_before_export
+                 and fbx.use_selection
+                 and bool(context.selected_objects))
+
+    def _export(mapping):
+        plan = _export_plan(context, mapping)
+        # Splitting only means anything when the export set is the selection.
+        if preset.split_per_object and fbx.use_selection:
+            return _export_per_object(context, project, preset, kwargs, plan)
+        return _export_single(context, project, preset, kwargs, plan)
+
+    try:
+        if on_copies:
+            with _transformed_copies(context, list(context.selected_objects)) as mapping:
+                ok, message, folder = _export(mapping)
+        else:
+            ok, message, folder = _export(None)
+    except RuntimeError as exc:
+        # Duplication or transform_apply refused — object mode only, and it
+        # baulks at library data. Reporting beats exporting something the user
+        # believes was transformed and was not.
+        return False, "%s: could not apply transforms (%s)" % (preset.name, exc)
 
     if not ok:
         return False, "%s: %s" % (preset.name, message)

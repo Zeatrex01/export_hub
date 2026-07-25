@@ -151,6 +151,28 @@ way cannot be read out of geometry — no tool can tell you where a face is poin
 one stays a human check. The convention the engine presets assume is: characters face `-Y` in
 Blender, unrotated.
 
+## Baking rotation and scale without touching your scene
+
+Engines want assets with clean rotation and scale, but applying them in Blender is a permanent
+edit to your working file. **Bake rotation & scale** gets both: the selection is duplicated, the
+transforms are applied to the duplicates, the duplicates are exported and then deleted. Your
+objects keep their rotation and scale exactly as you left them.
+
+**Location is deliberately not applied.** Applying it moves an object's origin to the world
+origin and bakes the offset into the vertices — identical in Blender, but the engine then holds a
+mesh whose pivot sits at zero while its geometry is somewhere else, so the prop rotates around a
+point it is nowhere near. Where the pivot goes is a modelling decision, not something an exporter
+should quietly change.
+
+The whole selection is duplicated in one step, so parenting and armature-modifier links between
+the objects survive into the export. Filenames still come from the original object names, not
+from Blender's `Chair.001` duplicate naming. If anything fails partway, the duplicates are
+removed anyway.
+
+Validation knows about this: with baking on, an unapplied scale is reported as fine rather than
+as something to go and fix by hand. Negative scale is still an error, since baking it does not
+un-invert the normals.
+
 ## One file per object
 
 Prop libraries usually want one FBX per asset, not one FBX containing everything. Turn on
@@ -223,8 +245,8 @@ has to be GPL-compatible — this is not a preference, it applies to every Blend
 
 - Fields you type into directly (export folder, filename template) are written to disk on your
   next export or button press. Use **Save Settings** in Preferences to write them immediately.
-- *Apply transforms before export* modifies your scene and does not undo it afterwards. It now
-  reports a failure instead of silently doing nothing, but it is still destructive.
+- Baking transforms requires the *Selected Objects* export mode, since the copies are made from
+  the selection.
 - Re-exporting from history writes to that entry's original path, so `{date}` and `{version}`
   tokens are not re-resolved — it overwrites the original file rather than producing a new one.
 - Export All refuses to run if two presets resolve to the same output path, rather than

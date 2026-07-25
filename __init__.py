@@ -16,7 +16,7 @@
 bl_info = {
     "name": "Export Hub",
     "author": "Malik3D",
-    "version": (1, 6, 0),
+    "version": (1, 7, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > Export",
     "description": "One-click FBX export of the current selection to per-project folders, "

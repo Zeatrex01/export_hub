@@ -39,8 +39,15 @@ _STANDARD_FRAME_RATES = (24, 25, 30, 48, 50, 60, 120)
 _SEVERITY = {'ERROR': 0, 'WARNING': 1, 'INFO': 2, 'OK': 3}
 
 
-def check_transform(name, scale, rotation_euler):
-    """Unapplied transforms on an object about to be exported."""
+def check_transform(name, scale, rotation_euler, baked_on_export=False):
+    """Unapplied transforms on an object about to be exported.
+
+    `baked_on_export` says the preset will apply transforms to a temporary copy.
+    In that case an unapplied scale is not a problem to fix, and telling the user
+    to press Ctrl+A would be advising a destructive edit the add-on is about to
+    handle for them. Negative scale still matters — baking it does not un-invert
+    the normals.
+    """
     checks = []
     sx, sy, sz = scale
 
@@ -52,21 +59,36 @@ def check_transform(name, scale, rotation_euler):
         ))
     elif any(abs(s - 1.0) > _SCALE_TOLERANCE for s in (sx, sy, sz)):
         uniform = abs(max(sx, sy, sz) - min(sx, sy, sz)) <= _SCALE_TOLERANCE
-        checks.append(Check(
-            'WARNING',
-            "%s: scale is %s(%.3f, %.3f, %.3f), not applied — Ctrl+A > Scale"
-            % (name, "" if uniform else "non-uniform ", sx, sy, sz),
-        ))
+        if baked_on_export:
+            checks.append(Check(
+                'OK',
+                "%s: scale is %s(%.3f, %.3f, %.3f) — baked into a temporary copy "
+                "at export, your object is left alone"
+                % (name, "" if uniform else "non-uniform ", sx, sy, sz),
+            ))
+        else:
+            checks.append(Check(
+                'WARNING',
+                "%s: scale is %s(%.3f, %.3f, %.3f), not applied — Ctrl+A > Scale"
+                % (name, "" if uniform else "non-uniform ", sx, sy, sz),
+            ))
     else:
         checks.append(Check('OK', "%s: scale applied (1, 1, 1)" % name))
 
     degrees = [math.degrees(r) for r in rotation_euler]
     if any(abs(r) > _ANGLE_TOLERANCE for r in rotation_euler):
-        checks.append(Check(
-            'WARNING',
-            "%s: rotation is (%.1f°, %.1f°, %.1f°), not applied — Ctrl+A > Rotation"
-            % (name, degrees[0], degrees[1], degrees[2]),
-        ))
+        if baked_on_export:
+            checks.append(Check(
+                'OK',
+                "%s: rotation (%.1f°, %.1f°, %.1f°) — baked into a temporary copy at export"
+                % (name, degrees[0], degrees[1], degrees[2]),
+            ))
+        else:
+            checks.append(Check(
+                'WARNING',
+                "%s: rotation is (%.1f°, %.1f°, %.1f°), not applied — Ctrl+A > Rotation"
+                % (name, degrees[0], degrees[1], degrees[2]),
+            ))
     else:
         checks.append(Check('OK', "%s: rotation applied (0°, 0°, 0°)" % name))
 
@@ -248,6 +270,7 @@ def run(context, project, preset):
     # State the terms of the check, so a clean result is readable as "these
     # things were examined" rather than an unexplained thumbs up.
     splitting = bool(getattr(preset, "split_per_object", False)) and from_selection
+    baking = bool(getattr(preset, "apply_transform_before_export", False)) and from_selection
     checks = [Check(
         'INFO',
         "Checked %d %s against '%s' — exporting %s%s%s"
@@ -258,6 +281,13 @@ def run(context, project, preset):
            ", animation baked" if wants_anim else "",
            ", one file per object" if splitting else ""),
     )]
+
+    if baking:
+        checks.append(Check(
+            'OK',
+            "Rotation and scale are baked into temporary copies at export — your scene "
+            "objects are not modified, and object origins stay where you put them",
+        ))
 
     # Scene-wide settings first: they invalidate every object at once, so seeing
     # them at the top explains any per-object weirdness underneath.
@@ -273,7 +303,8 @@ def run(context, project, preset):
             continue
         considered += 1
 
-        checks.extend(check_transform(obj.name, tuple(obj.scale), tuple(obj.rotation_euler)))
+        checks.extend(check_transform(
+            obj.name, tuple(obj.scale), tuple(obj.rotation_euler), baked_on_export=baking))
 
         if obj.type == 'MESH':
             mesh = obj.data
