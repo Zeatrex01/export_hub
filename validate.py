@@ -1,0 +1,239 @@
+"""Pre-export sanity checks.
+
+These catch the mistakes that export *successfully* and only surface in the
+engine: an unapplied scale, a mirrored object whose normals invert, a mesh with
+no UVs, a rig yawed away from the axis the engine treats as forward, an
+animation preset with nothing to bake.
+
+Every rule reports on success as well as failure. A validator that only speaks
+up when something is wrong leaves you unable to tell "everything is fine" from
+"nothing was actually checked", so each rule returns what it looked at and what
+it found either way.
+
+The rules are plain functions over plain values — no bpy — so they can be
+reasoned about and tested without launching Blender. `run()` is the only part
+that touches Blender data, and all it does is read values and hand them over.
+"""
+
+import math
+from collections import namedtuple
+
+# level: 'ERROR'   almost certainly broken in the engine
+#        'WARNING' suspicious, usually a mistake, sometimes deliberate
+#        'INFO'    context: what was checked, and against what
+#        'OK'      this rule ran and the data passed it
+Check = namedtuple("Check", "level message")
+
+_SCALE_TOLERANCE = 1e-4
+_ANGLE_TOLERANCE = math.radians(0.05)
+
+# Blender characters are conventionally modelled facing -Y, which is what the
+# engine presets translate into the engine's own forward axis.
+FORWARD_CONVENTION = "-Y"
+
+# Worst first — the panel lists them in this order.
+_SEVERITY = {'ERROR': 0, 'WARNING': 1, 'INFO': 2, 'OK': 3}
+
+
+def check_transform(name, scale, rotation_euler):
+    """Unapplied transforms on an object about to be exported."""
+    checks = []
+    sx, sy, sz = scale
+
+    if min(sx, sy, sz) < 0.0:
+        checks.append(Check(
+            'ERROR',
+            "%s: negative scale (%.3f, %.3f, %.3f) — faces will be inside out "
+            "in the engine. Apply scale, then flip normals." % (name, sx, sy, sz),
+        ))
+    elif any(abs(s - 1.0) > _SCALE_TOLERANCE for s in (sx, sy, sz)):
+        uniform = abs(max(sx, sy, sz) - min(sx, sy, sz)) <= _SCALE_TOLERANCE
+        checks.append(Check(
+            'WARNING',
+            "%s: scale is %s(%.3f, %.3f, %.3f), not applied — Ctrl+A > Scale"
+            % (name, "" if uniform else "non-uniform ", sx, sy, sz),
+        ))
+    else:
+        checks.append(Check('OK', "%s: scale applied (1, 1, 1)" % name))
+
+    degrees = [math.degrees(r) for r in rotation_euler]
+    if any(abs(r) > _ANGLE_TOLERANCE for r in rotation_euler):
+        checks.append(Check(
+            'WARNING',
+            "%s: rotation is (%.1f°, %.1f°, %.1f°), not applied — Ctrl+A > Rotation"
+            % (name, degrees[0], degrees[1], degrees[2]),
+        ))
+    else:
+        checks.append(Check('OK', "%s: rotation applied (0°, 0°, 0°)" % name))
+
+    return checks
+
+
+def check_mesh(name, polygon_count, uv_layer_count):
+    """Mesh data problems an engine will reject, or silently shade wrong."""
+    checks = []
+    if polygon_count == 0:
+        checks.append(Check('ERROR', "%s: mesh has no faces — nothing to export" % name))
+        return checks
+
+    checks.append(Check('OK', "%s: %d face(s)" % (name, polygon_count)))
+    if uv_layer_count == 0:
+        checks.append(Check(
+            'WARNING', "%s: no UV map — the engine cannot texture this" % name))
+    else:
+        checks.append(Check('OK', "%s: %d UV map(s)" % (name, uv_layer_count)))
+    return checks
+
+
+def check_rig_facing(name, z_rotation):
+    """Report the rig's yaw relative to the forward convention.
+
+    Honest about its limits: this measures the object's yaw, which is the part
+    that is actually knowable. Whether the *model* was sculpted facing the wrong
+    way cannot be read out of the data — no amount of geometry inspection tells
+    you where a character's face is — so that stays a human check.
+    """
+    if abs(z_rotation) > _ANGLE_TOLERANCE:
+        return [Check(
+            'WARNING',
+            "%s: rig is yawed %.1f° — the engine will import it facing that way. "
+            "Rigs should sit unrotated, facing %s."
+            % (name, math.degrees(z_rotation), FORWARD_CONVENTION),
+        )]
+    return [Check(
+        'OK',
+        "%s: rig unrotated, so it faces %s as the engine presets expect "
+        "(whether the model itself was built facing that way is yours to eyeball)"
+        % (name, FORWARD_CONVENTION),
+    )]
+
+
+def check_animation(name, has_action, action_name, action_range, scene_range):
+    """Animation-preset problems: nothing to bake, or a bake window that clips it."""
+    if not has_action:
+        return [Check(
+            'ERROR',
+            "%s: this preset bakes animation but the rig has no action assigned" % name,
+        )]
+
+    if not (action_range and scene_range):
+        return [Check('OK', "%s: action '%s' assigned" % (name, action_name))]
+
+    a_start, a_end = action_range
+    s_start, s_end = scene_range
+    if a_start < s_start or a_end > s_end:
+        return [Check(
+            'WARNING',
+            "%s: action '%s' spans %d-%d but the scene range is %d-%d — the bake "
+            "uses the scene range, so the clip will be cut"
+            % (name, action_name, a_start, a_end, s_start, s_end),
+        )]
+    return [Check(
+        'OK',
+        "%s: action '%s' spans %d-%d, inside the scene range %d-%d"
+        % (name, action_name, a_start, a_end, s_start, s_end),
+    )]
+
+
+def summarise(checks):
+    """Return (errors, warnings, passed) counts for a one-line report."""
+    errors = sum(1 for c in checks if c.level == 'ERROR')
+    warnings = sum(1 for c in checks if c.level == 'WARNING')
+    passed = sum(1 for c in checks if c.level == 'OK')
+    return errors, warnings, passed
+
+
+def sort_for_display(checks):
+    """Problems first, then context, then everything that passed."""
+    return sorted(checks, key=lambda c: _SEVERITY.get(c.level, 9))
+
+
+# --------------------------------------------------------------------------- #
+# The Blender-facing edge: read values, delegate to the rules above.
+# --------------------------------------------------------------------------- #
+
+# Set by the operator, read by the panel.
+_last_result = {"checks": [], "preset": "", "ran": False}
+
+
+def last_result():
+    return dict(_last_result, checks=list(_last_result["checks"]))
+
+
+def store_result(preset_name, checks):
+    _last_result["checks"] = list(checks)
+    _last_result["preset"] = preset_name
+    _last_result["ran"] = True
+
+
+def clear_result():
+    _last_result["checks"] = []
+    _last_result["preset"] = ""
+    _last_result["ran"] = False
+
+
+def run(context, project, preset):
+    """Validate the current selection against one preset. Returns [Check]."""
+    fbx = preset.fbx_settings
+    from_selection = bool(fbx.use_selection)
+    objects = list(context.selected_objects) if from_selection else list(context.scene.objects)
+
+    if not objects:
+        return [Check('ERROR', "Nothing selected to export")]
+
+    types_exported = set(fbx.object_types)
+    wants_anim = bool(fbx.bake_anim)
+    scene = context.scene
+    scene_range = (scene.frame_start, scene.frame_end)
+
+    # State the terms of the check, so a clean result is readable as "these
+    # things were examined" rather than an unexplained thumbs up.
+    checks = [Check(
+        'INFO',
+        "Checked %d %s against '%s' — exporting %s%s"
+        % (len(objects),
+           "selected object(s)" if from_selection else "scene object(s)",
+           preset.name,
+           ", ".join(sorted(types_exported)) or "nothing",
+           ", animation baked" if wants_anim else ""),
+    )]
+
+    considered = 0
+    for obj in objects:
+        if obj.type not in types_exported and obj.type in {'MESH', 'ARMATURE'}:
+            # Not part of this preset's payload; its transform cannot break it.
+            continue
+        considered += 1
+
+        checks.extend(check_transform(obj.name, tuple(obj.scale), tuple(obj.rotation_euler)))
+
+        if obj.type == 'MESH':
+            mesh = obj.data
+            checks.extend(check_mesh(obj.name, len(mesh.polygons), len(mesh.uv_layers)))
+
+        elif obj.type == 'ARMATURE':
+            checks.extend(check_rig_facing(obj.name, obj.rotation_euler[2]))
+            if wants_anim:
+                action = getattr(getattr(obj, "animation_data", None), "action", None)
+                checks.extend(check_animation(
+                    obj.name,
+                    action is not None,
+                    getattr(action, "name", ""),
+                    tuple(int(v) for v in action.frame_range) if action else None,
+                    scene_range,
+                ))
+
+    if not considered:
+        checks.append(Check(
+            'WARNING',
+            "None of the selected objects match this preset's object types — "
+            "the export would be empty",
+        ))
+
+    if wants_anim and not any(o.type == 'ARMATURE' for o in objects):
+        checks.append(Check(
+            'WARNING',
+            "This preset bakes animation but no armature is in the export set",
+        ))
+
+    return checks

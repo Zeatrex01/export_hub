@@ -31,6 +31,8 @@ Project "Unity"                 Project "Unreal"
 - **Full FBX control** — every option from Blender's exporter, saved per preset.
 - **Built-in engine templates** — ready-made settings for Unity, Unreal and Godot.
 - **Filename templates** — build output names from tokens like `{blend}`, `{object}`, `{date}`.
+- **Validate before export** — catch unapplied transforms, missing UVs, mirrored objects
+  and clipped animation ranges before they reach the engine.
 - **Export All** — run every enabled preset in a project in one click.
 - **Export history** — the last 50 exports, each re-runnable with the exact settings used.
 - **Shareable config** — export projects and presets to JSON, import them on another machine.
@@ -95,11 +97,65 @@ Templates are starting points, not locks: applying one writes the values onto yo
 leaves. Every setting stays editable afterwards, and the export folder and filename template
 are never touched.
 
+## Validate
+
+**Validate** checks the current selection against the active preset and lists what it finds
+in the sidebar. It never blocks an export — it tells you, you decide.
+
+Every rule reports whether it passed or failed, so a clean result reads as *these things were
+examined and they are fine* rather than an unexplained thumbs up:
+
+```
+  Checked 2 selected object(s) against 'Skeletal Mesh' — exporting ARMATURE, MESH, animation baked
+  Body: scale applied (1, 1, 1)
+  Body: rotation applied (0°, 0°, 0°)
+  Body: 4812 face(s)
+  Body: 1 UV map(s)
+  Rig: rig unrotated, so it faces -Y as the engine presets expect
+  Rig: action 'Run' spans 1-60, inside the scene range 1-100
+```
+
+Problems sort to the top, and the eye icon in the header hides the passing lines once you
+only care about what is wrong.
+
+| Check | Level |
+|---|---|
+| Nothing selected to export | error |
+| Negative scale — faces import inside out | error |
+| Mesh has no faces | error |
+| Animation preset, but the rig has no action | error |
+| Scale or rotation not applied | warning |
+| Non-uniform scale | warning |
+| Mesh has no UV map | warning |
+| Rig is yawed away from the `-Y` forward convention | warning |
+| Action is longer than the scene frame range, so the bake will cut it | warning |
+
+That last one is worth knowing about: the FBX exporter bakes over the **scene** frame range,
+not the action's, so an action running past `frame_end` exports truncated with no warning from
+Blender.
+
+**On rig orientation:** Validate reports the rig object's yaw, because that is what is
+actually knowable from the file. Whether the character *model* was sculpted facing the wrong
+way cannot be read out of geometry — no tool can tell you where a face is pointing — so that
+one stays a human check. The convention the engine presets assume is: characters face `-Y` in
+Blender, unrotated.
+
 ## Sharing configuration
 
 **Preferences → Export Config to JSON** writes every project and preset to a file. Import it
 on another machine, or hand it to a teammate, with *Replace all* or *Append*. Exported JSON
 carries the actual values, so it stays valid even if the built-in templates change later.
+
+## Update notifications
+
+The add-on asks GitHub once a day whether a newer release exists, and shows a line in the
+sidebar when there is one. The request runs on a background thread, so Blender never stalls
+waiting for the network.
+
+Turn it off with **Check for updates** in Preferences — with it unchecked the add-on makes no
+network requests at all. **Check Now** runs one on demand.
+
+Note that it compares against published **Releases**, not commits or tags.
 
 ## Compatibility
 

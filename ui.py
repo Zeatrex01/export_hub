@@ -2,7 +2,101 @@
 
 import bpy
 
-from . import config, templates
+from . import config, templates, updates, validate
+
+_CHECK_ICONS = {
+    'ERROR': 'CANCEL',
+    'WARNING': 'ERROR',        # Blender's exclamation-mark triangle
+    'INFO': 'INFO',
+    'OK': 'CHECKMARK',
+}
+
+
+def _draw_validation(layout, prefs):
+    """Show the last validation run — what passed as well as what did not.
+
+    Nothing is drawn until the user asks for a run.
+    """
+    result = validate.last_result()
+    if not result["ran"]:
+        return
+
+    checks = validate.sort_for_display(result["checks"])
+    errors, warnings, passed = validate.summarise(checks)
+
+    box = layout.box()
+    header = box.row(align=True)
+    if errors:
+        header.alert = True
+        header.label(text="%d problem(s), %d warning(s), %d passed"
+                          % (errors, warnings, passed), icon='CANCEL')
+    elif warnings:
+        header.label(text="%d warning(s), %d passed" % (warnings, passed), icon='ERROR')
+    else:
+        header.label(text="All %d check(s) passed" % passed, icon='CHECKMARK')
+    header.prop(prefs, "show_passed_checks", text="",
+                icon='HIDE_OFF' if prefs.show_passed_checks else 'HIDE_ON')
+    header.operator("export_hub.clear_validation", text="", icon='X', emboss=False)
+
+    hidden = 0
+    column = box.column(align=True)
+    for check in checks:
+        if check.level == 'OK' and not prefs.show_passed_checks:
+            hidden += 1
+            continue
+        row = column.row()
+        row.alert = check.level == 'ERROR'
+        row.label(text=check.message, icon=_CHECK_ICONS.get(check.level, 'INFO'))
+
+    if hidden:
+        column.label(text="%d passed check(s) hidden" % hidden, icon='BLANK1')
+
+
+def _draw_update_banner(layout):
+    """A single line in the sidebar when a newer release exists. Silent otherwise."""
+    info = updates.state()
+    if info["status"] != "available":
+        return
+    box = layout.box()
+    row = box.row()
+    row.alert = True
+    row.label(
+        text="Version %s available" % updates.format_version(info["latest"]),
+        icon='INFO',
+    )
+    box.operator("wm.url_open", text="Download", icon='URL').url = updates.RELEASES_PAGE
+
+
+def _draw_update_row(layout, prefs):
+    """Update controls and the last check's outcome, shown in Preferences."""
+    box = layout.box()
+    row = box.row(align=True)
+    row.prop(prefs, "check_updates")
+    row.operator("export_hub.check_updates", text="Check Now", icon='FILE_REFRESH')
+
+    info = updates.state()
+    status = info["status"]
+    installed = updates.format_version(updates.current_version())
+
+    if status == "checking":
+        box.label(text="Checking...", icon='SORTTIME')
+    elif status == "available":
+        row = box.row()
+        row.alert = True
+        row.label(
+            text="Version %s available — installed %s"
+                 % (updates.format_version(info["latest"]), installed),
+            icon='INFO',
+        )
+        box.operator(
+            "wm.url_open", text="Open releases page", icon='URL'
+        ).url = updates.RELEASES_PAGE
+    elif status == "current":
+        box.label(text="Up to date (%s)" % installed, icon='CHECKMARK')
+    elif status == "none":
+        box.label(text=info["message"], icon='INFO')
+    elif status == "error":
+        box.label(text="Update check failed: %s" % info["message"], icon='ERROR')
 
 
 class EXH_MT_templates(bpy.types.Menu):
@@ -158,6 +252,8 @@ def draw_preferences(prefs, context):
     row.operator("export_hub.export_presets", icon='EXPORT')
     row.operator("export_hub.save_settings", icon='FILE_TICK')
 
+    _draw_update_row(layout, prefs)
+
     layout.separator()
 
     # --- Projects ---
@@ -230,6 +326,8 @@ class EXH_PT_export(bpy.types.Panel):
             layout.label(text="Add-on not available.", icon='ERROR')
             return
 
+        _draw_update_banner(layout)
+
         if not len(prefs.projects):
             layout.label(text="No projects configured.", icon='INFO')
             layout.menu("EXH_MT_new_project", text="Start from an Engine", icon='PRESET')
@@ -263,6 +361,9 @@ class EXH_PT_export(bpy.types.Panel):
             col.label(text="→ " + preview, icon='FILE_TICK')
 
         layout.separator()
+        layout.operator("export_hub.validate", text="Validate", icon='CHECKMARK')
+        _draw_validation(layout, prefs)
+
         row = layout.row()
         row.scale_y = 1.7
         row.operator("export_hub.export", text="Export", icon='EXPORT')

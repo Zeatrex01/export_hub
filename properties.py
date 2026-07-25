@@ -253,6 +253,21 @@ class EXH_Preferences(bpy.types.AddonPreferences):
     history: CollectionProperty(type=EXH_HistoryEntry)
     active_history_index: IntProperty(default=0)
 
+    show_passed_checks: BoolProperty(
+        name="Show passed checks",
+        default=True,
+        description="List the checks that passed, not only the problems",
+    )
+    check_updates: BoolProperty(
+        name="Check for updates",
+        default=True,
+        description=(
+            "Ask GitHub once a day whether a newer release of this add-on exists. "
+            "Turn off to stop the add-on contacting the network entirely"
+        ),
+    )
+    last_update_check: StringProperty(default="")  # ISO date, throttles to once a day
+
     def draw(self, context):
         # Real drawing lives in ui.py to keep this module data-only.
         from . import ui

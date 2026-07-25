@@ -17,7 +17,7 @@ set "OUT=%ROOT%build"
 set "STAGE=%OUT%\export_hub"
 
 REM Files that make up the add-on. Add here when a new module joins the package.
-set "FILES=__init__.py config.py operators.py properties.py templates.py ui.py"
+set "FILES=__init__.py config.py operators.py properties.py templates.py ui.py updates.py validate.py"
 REM Shipped only if present.
 set "OPTIONAL=README.md LICENSE LICENSE.txt"
 

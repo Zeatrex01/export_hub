@@ -8,7 +8,7 @@ import bpy
 from bpy.props import StringProperty, EnumProperty, IntProperty
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
-from . import config, templates
+from . import config, templates, updates, validate
 from .properties import FBX_SETTING_KEYS, save_preferences
 
 
@@ -314,6 +314,66 @@ class EXH_OT_insert_token(bpy.types.Operator):
             return {'CANCELLED'}
         preset.filename_template = (preset.filename_template or "") + "{%s}" % self.token
         save_preferences()
+        return {'FINISHED'}
+
+
+class EXH_OT_validate(bpy.types.Operator):
+    bl_idname = "export_hub.validate"
+    bl_label = "Validate"
+    bl_description = ("Check the current selection against the active preset before "
+                      "exporting: unapplied transforms, missing UVs, rig orientation "
+                      "and animation range")
+
+    @classmethod
+    def poll(cls, context):
+        prefs, project, preset = _active_preset(context)
+        return preset is not None
+
+    def execute(self, context):
+        prefs, project, preset = _active_preset(context)
+        if preset is None:
+            self.report({'ERROR'}, "No preset selected")
+            return {'CANCELLED'}
+
+        checks = validate.run(context, project, preset)
+        validate.store_result(preset.name, checks)
+        errors, warnings, passed = validate.summarise(checks)
+
+        if errors:
+            self.report({'ERROR'}, "%d problem(s), %d warning(s), %d check(s) passed"
+                        % (errors, warnings, passed))
+        elif warnings:
+            self.report({'WARNING'}, "%d warning(s), %d check(s) passed" % (warnings, passed))
+        else:
+            self.report({'INFO'}, "All %d check(s) passed for '%s'" % (passed, preset.name))
+        return {'FINISHED'}
+
+
+class EXH_OT_clear_validation(bpy.types.Operator):
+    bl_idname = "export_hub.clear_validation"
+    bl_label = "Dismiss"
+    bl_description = "Hide the validation results"
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        validate.clear_result()
+        return {'FINISHED'}
+
+
+class EXH_OT_check_updates(bpy.types.Operator):
+    bl_idname = "export_hub.check_updates"
+    bl_label = "Check for Updates"
+    bl_description = "Ask GitHub whether a newer release of this add-on is available"
+
+    def execute(self, context):
+        prefs = config.get_prefs(context)
+        if prefs is not None:
+            prefs.last_update_check = datetime.date.today().isoformat()
+            save_preferences()
+        if not updates.start_check():
+            self.report({'INFO'}, "Already checking")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Checking for updates...")
         return {'FINISHED'}
 
 
@@ -644,6 +704,9 @@ classes = (
     EXH_OT_preset_move,
     EXH_OT_preset_duplicate,
     EXH_OT_insert_token,
+    EXH_OT_validate,
+    EXH_OT_clear_validation,
+    EXH_OT_check_updates,
     EXH_OT_save_settings,
     EXH_OT_apply_template,
     EXH_OT_add_project_from_template,
