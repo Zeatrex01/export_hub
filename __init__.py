@@ -56,15 +56,18 @@ def register():
     for mod in _modules:
         for cls in mod.classes:
             bpy.utils.register_class(cls)
+    bpy.types.TOPBAR_MT_file_export.append(ui.menu_func_export)
     bpy.app.timers.register(_startup_update_check, first_interval=5.0)
 
 
 def unregister():
-    # Timers outlive class registration, so they have to go first or disabling
-    # the add-on leaves a callback pointing at unregistered code.
+    # Timers and menu entries outlive class registration, so they go first —
+    # otherwise disabling the add-on leaves a callback or a menu item pointing
+    # at code that no longer exists.
     if bpy.app.timers.is_registered(_startup_update_check):
         bpy.app.timers.unregister(_startup_update_check)
     updates.unregister_timers()
+    bpy.types.TOPBAR_MT_file_export.remove(ui.menu_func_export)
 
     for mod in reversed(_modules):
         for cls in reversed(mod.classes):

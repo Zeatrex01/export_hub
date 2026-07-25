@@ -6,7 +6,7 @@ import datetime
 import contextlib
 
 import bpy
-from bpy.props import StringProperty, EnumProperty, IntProperty
+from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import config, templates, updates, validate
@@ -136,21 +136,25 @@ def _export_plan(context, mapping):
     return [(copy, original.name) for original, copy in mapping.items()]
 
 
-def _resolve_target(context, project, preset, object_name=None):
+def _resolve_target(context, project, preset, object_name=None, export_dir_override=None):
     """Resolve a preset's absolute output path.
 
     Returns (export_dir, filepath, error). Both the export and the Export All
     collision check go through here, so the path that gets checked is by
     construction the same one that gets written.
+
+    export_dir_override redirects a single export without touching the preset's
+    saved folder — the export dialog uses it for one-off destinations.
     """
-    if preset.export_dir.startswith("//") and not bpy.data.filepath:
+    source_dir = export_dir_override or preset.export_dir
+    if source_dir.startswith("//") and not bpy.data.filepath:
         # "//" is relative to the .blend. With no .blend saved, Blender resolves
         # it against the process working directory, which is wherever Blender
         # happened to be launched from — files would land somewhere the user
         # never chose.
         return None, None, "save the .blend first, or set an absolute export folder"
 
-    export_dir = bpy.path.abspath(preset.export_dir)
+    export_dir = bpy.path.abspath(source_dir)
     if not export_dir:
         return None, None, "no export folder set"
 
@@ -200,14 +204,15 @@ def _export_fbx(context, filepath, kwargs):
     return True, filepath
 
 
-def _export_single(context, project, preset, kwargs, plan):
+def _export_single(context, project, preset, kwargs, plan, export_dir_override=None):
     """Export the whole export set to one file. Returns (ok, message, folder)."""
     active = context.view_layer.objects.active
     display = next((name for obj, name in plan if obj is active), None)
     if display is None and plan:
         display = plan[0][1]
 
-    export_dir, filepath, error = _resolve_target(context, project, preset, object_name=display)
+    export_dir, filepath, error = _resolve_target(
+        context, project, preset, object_name=display, export_dir_override=export_dir_override)
     if error:
         return False, error, None
 
@@ -219,7 +224,7 @@ def _export_single(context, project, preset, kwargs, plan):
     return True, filepath, export_dir
 
 
-def _export_per_object(context, project, preset, kwargs, plan):
+def _export_per_object(context, project, preset, kwargs, plan, export_dir_override=None):
     """Export every object in the plan to its own file. Returns (ok, message, folder).
 
     The selection is driven one object at a time and put back afterwards: the
@@ -247,7 +252,8 @@ def _export_per_object(context, project, preset, kwargs, plan):
             context.view_layer.objects.active = obj
 
             export_dir, filepath, error = _resolve_target(
-                context, project, preset, object_name=display)
+                context, project, preset, object_name=display,
+                export_dir_override=export_dir_override)
             if error:
                 return False, error, None
 
@@ -275,7 +281,27 @@ def _export_per_object(context, project, preset, kwargs, plan):
     return True, "%d file(s) in %s" % (len(written), folder), folder
 
 
-def _run_export(context, project, preset):
+def _first_collision(context, project, presets, export_dir_override=None):
+    """Return an error string if two presets would write to the same file.
+
+    Shared by Export All and the export dialog so both refuse on the same
+    grounds — two presets landing on one path means one export is silently lost.
+    """
+    seen = {}
+    for preset in presets:
+        _, filepath, error = _resolve_target(
+            context, project, preset, export_dir_override=export_dir_override)
+        if error:
+            continue  # reported per preset when the export runs
+        key = os.path.normcase(filepath)
+        if key in seen:
+            return ("'%s' and '%s' both export to %s — add {preset} to the filename template"
+                    % (seen[key], preset.name, os.path.basename(filepath)))
+        seen[key] = preset.name
+    return None
+
+
+def _run_export(context, project, preset, export_dir_override=None):
     """Perform a preset's export, split or combined. Returns (success, message)."""
     fbx = preset.fbx_settings
     if fbx.use_selection and not context.selected_objects:
@@ -293,8 +319,9 @@ def _run_export(context, project, preset):
         plan = _export_plan(context, mapping)
         # Splitting only means anything when the export set is the selection.
         if preset.split_per_object and fbx.use_selection:
-            return _export_per_object(context, project, preset, kwargs, plan)
-        return _export_single(context, project, preset, kwargs, plan)
+            return _export_per_object(
+                context, project, preset, kwargs, plan, export_dir_override)
+        return _export_single(context, project, preset, kwargs, plan, export_dir_override)
 
     try:
         if on_copies:
@@ -814,6 +841,177 @@ class EXH_OT_history_clear(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# Dynamic enum items keep module-side references for the same reason the project
+# dropdown does: Blender holds pointers to the strings a callback hands back.
+_dialog_project_cache = ()
+_dialog_preset_cache = ()
+
+
+def _dialog_project_items(self, context):
+    global _dialog_project_cache
+    prefs = config.get_prefs(context)
+    items = [(str(i), p.name or "Project %d" % i, "")
+             for i, p in enumerate(prefs.projects)] if prefs else []
+    _dialog_project_cache = tuple(items) or (("-1", "(no projects)", ""),)
+    return _dialog_project_cache
+
+
+def _dialog_preset_items(self, context):
+    global _dialog_preset_cache
+    prefs = config.get_prefs(context)
+    items = []
+    if prefs and self.project not in ("", "-1"):
+        index = int(self.project)
+        if 0 <= index < len(prefs.projects):
+            items = [(str(i), p.name or "Preset %d" % i, "")
+                     for i, p in enumerate(prefs.projects[index].presets)]
+    _dialog_preset_cache = tuple(items) or (("-1", "(no presets)", ""),)
+    return _dialog_preset_cache
+
+
+class EXH_OT_export_dialog(bpy.types.Operator):
+    """File > Export entry: pick a destination and run it, without leaving for the sidebar."""
+
+    bl_idname = "export_hub.export_dialog"
+    bl_label = "Export Hub"
+    bl_description = "Export with a saved Export Hub project and preset"
+
+    project: EnumProperty(name="Project", items=_dialog_project_items)
+    preset: EnumProperty(name="Preset", items=_dialog_preset_items)
+    mode: EnumProperty(
+        name="Run",
+        items=[
+            ('ACTIVE', "This preset", "Export using the selected preset only"),
+            ('ALL', "All enabled presets", "Run every enabled preset in this project"),
+        ],
+        default='ACTIVE',
+    )
+    use_custom_dir: BoolProperty(
+        name="Override folder",
+        default=False,
+        description=("Write this export somewhere else, just this once. The preset keeps "
+                     "its saved folder"),
+    )
+    custom_dir: StringProperty(name="Folder", subtype='DIR_PATH', default="")
+
+    def _selection(self, context):
+        """(prefs, project, preset) for the current dialog choices."""
+        prefs = config.get_prefs(context)
+        if prefs is None or self.project in ("", "-1"):
+            return prefs, None, None
+        index = int(self.project)
+        if not (0 <= index < len(prefs.projects)):
+            return prefs, None, None
+        project = prefs.projects[index]
+        if self.preset in ("", "-1"):
+            return prefs, project, None
+        pidx = int(self.preset)
+        if not (0 <= pidx < len(project.presets)):
+            return prefs, project, None
+        return prefs, project, project.presets[pidx]
+
+    def invoke(self, context, event):
+        prefs = config.get_prefs(context)
+        if prefs is None or not len(prefs.projects):
+            self.report({'ERROR'}, "No projects configured — set one up in Preferences")
+            return {'CANCELLED'}
+
+        # Open on whatever the sidebar is showing, so the two never disagree.
+        self.project = str(min(max(prefs.active_project_index, 0), len(prefs.projects) - 1))
+        project = prefs.projects[int(self.project)]
+        if len(project.presets):
+            try:
+                self.preset = str(
+                    min(max(project.active_preset_index, 0), len(project.presets) - 1))
+            except TypeError:
+                pass
+        return context.window_manager.invoke_props_dialog(self, width=440)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+
+        layout.prop(self, "project")
+        layout.prop(self, "mode")
+        if self.mode == 'ACTIVE':
+            layout.prop(self, "preset")
+
+        layout.prop(self, "use_custom_dir")
+        row = layout.row()
+        row.enabled = self.use_custom_dir
+        row.prop(self, "custom_dir")
+
+        prefs, project, preset = self._selection(context)
+        box = layout.box()
+        if project is None:
+            box.label(text="Pick a project", icon='ERROR')
+            return
+
+        if self.mode == 'ALL':
+            enabled = [p for p in project.presets if p.enabled]
+            box.label(text="%d enabled preset(s) in '%s'" % (len(enabled), project.name),
+                      icon='PACKAGE')
+            for p in enabled[:6]:
+                box.label(text=p.name, icon='DOT')
+            return
+
+        if preset is None:
+            box.label(text="This project has no presets", icon='ERROR')
+            return
+
+        folder = self.custom_dir if self.use_custom_dir else preset.export_dir
+        box.label(text=folder or "(no folder set)", icon='FILE_FOLDER')
+        name = config.resolve_filename(
+            preset.filename_template, context, project, preset) + ".fbx"
+        box.label(text="→ " + name, icon='FILE_TICK')
+        if preset.split_per_object and preset.fbx_settings.use_selection:
+            box.label(text="one file per selected object", icon='DUPLICATE')
+
+    def execute(self, context):
+        prefs, project, preset = self._selection(context)
+        if project is None:
+            self.report({'ERROR'}, "No project selected")
+            return {'CANCELLED'}
+
+        override = None
+        if self.use_custom_dir:
+            override = self.custom_dir
+            if not bpy.path.abspath(override or ""):
+                self.report({'ERROR'}, "Override folder is empty")
+                return {'CANCELLED'}
+
+        if self.mode == 'ALL':
+            enabled = [p for p in project.presets if p.enabled]
+            if not enabled:
+                self.report({'WARNING'}, "No enabled presets in '%s'" % project.name)
+                return {'CANCELLED'}
+            collision = _first_collision(context, project, enabled, override)
+            if collision:
+                self.report({'ERROR'}, collision)
+                return {'CANCELLED'}
+
+            done, failed = 0, []
+            for p in enabled:
+                ok, message = _run_export(context, project, p, override)
+                if ok:
+                    done += 1
+                else:
+                    failed.append(message)
+            if failed:
+                self.report({'WARNING'}, "%d exported, %d failed: %s"
+                            % (done, len(failed), "; ".join(failed)))
+            else:
+                self.report({'INFO'}, "Exported %d preset(s) from '%s'" % (done, project.name))
+            return {'FINISHED'}
+
+        if preset is None:
+            self.report({'ERROR'}, "No preset selected")
+            return {'CANCELLED'}
+        ok, message = _run_export(context, project, preset, override)
+        self.report({'INFO'} if ok else {'ERROR'}, message if ok else "Failed: " + message)
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
 class EXH_OT_export_all(bpy.types.Operator):
     bl_idname = "export_hub.export_all"
     bl_label = "Export All"
@@ -839,20 +1037,10 @@ class EXH_OT_export_all(bpy.types.Operator):
         # on the same path would overwrite each other silently — the run would
         # report success and one export would simply be gone. Refusing up front
         # is the only outcome that does not lose work.
-        targets = {}
-        for preset in enabled:
-            _, filepath, error = _resolve_target(context, project, preset)
-            if error:
-                continue  # _run_export reports this per preset
-            key = os.path.normcase(filepath)
-            if key in targets:
-                self.report(
-                    {'ERROR'},
-                    "'%s' and '%s' both export to %s — add {preset} to the filename template"
-                    % (targets[key], preset.name, os.path.basename(filepath)),
-                )
-                return {'CANCELLED'}
-            targets[key] = preset.name
+        collision = _first_collision(context, project, enabled)
+        if collision:
+            self.report({'ERROR'}, collision)
+            return {'CANCELLED'}
 
         done, failed = 0, []
         for preset in enabled:
@@ -889,6 +1077,7 @@ classes = (
     EXH_OT_import_presets,
     EXH_OT_open_export_folder,
     EXH_OT_export,
+    EXH_OT_export_dialog,
     EXH_OT_export_all,
     EXH_OT_history_reexport,
     EXH_OT_history_open,

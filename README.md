@@ -57,6 +57,17 @@ point it at a folder, and adjust the FBX settings underneath.
 
 Then: select your objects in the viewport and press **Export**.
 
+## Two ways to export
+
+**From the sidebar** — the fastest path once a project is set up: pick a preset, press Export.
+
+**From File → Export → Export Hub (.fbx)** — the same export, reachable where Blender users
+already look for exporting. The dialog lets you pick the project and preset, run a single preset
+or every enabled one in the project, and shows the folder and resolved filename before you commit.
+
+The dialog also has an **Override folder** switch for sending one export somewhere else without
+disturbing the preset's saved folder — useful for a quick hand-off without editing your setup.
+
 ## Filename templates
 
 The output name is built from tokens, so exports stay consistently named without typing.

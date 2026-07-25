@@ -483,6 +483,16 @@ class EXH_PT_history(bpy.types.Panel):
         layout.operator("export_hub.history_clear", text="Clear History", icon='TRASH')
 
 
+def menu_func_export(self, context):
+    """Entry appended to File > Export.
+
+    Not a class, so it is registered by hand in __init__ rather than through the
+    `classes` tuple — and removed there too, or a disabled add-on leaves a dead
+    menu item behind.
+    """
+    self.layout.operator("export_hub.export_dialog", text="Export Hub (.fbx)", icon='EXPORT')
+
+
 classes = (
     EXH_MT_templates,
     EXH_MT_new_project,
