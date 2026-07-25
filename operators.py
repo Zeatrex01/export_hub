@@ -113,12 +113,77 @@ def _export_fbx(context, filepath, kwargs):
     return True, filepath
 
 
-def _run_export(context, project, preset):
-    """Perform one FBX export from a preset. Returns (success: bool, message: str)."""
+def _export_single(context, project, preset, kwargs):
+    """Export the whole export set to one file. Returns (ok, message, folder)."""
     export_dir, filepath, error = _resolve_target(context, project, preset)
     if error:
-        return False, "%s: %s" % (preset.name, error)
+        return False, error, None
 
+    ok, message = _export_fbx(context, filepath, kwargs)
+    if not ok:
+        return False, message, None
+
+    _record_history(context, project.name, preset.name, filepath, kwargs)
+    return True, filepath, export_dir
+
+
+def _export_per_object(context, project, preset, kwargs):
+    """Export every selected object to its own file. Returns (ok, message, folder).
+
+    The selection is driven one object at a time and put back afterwards: the
+    user pressed one button, they should get their scene back exactly as it was,
+    including which object was active.
+    """
+    if "{object}" not in (preset.filename_template or ""):
+        return False, ("split export needs {object} in the filename template, "
+                       "otherwise every object writes to the same file"), None
+
+    originals = list(context.selected_objects)
+    original_active = context.view_layer.objects.active
+
+    written, failed, folder = [], [], None
+    try:
+        for obj in originals:
+            bpy.ops.object.select_all(action='DESELECT')
+            try:
+                obj.select_set(True)
+            except RuntimeError:
+                # Hidden or excluded from the view layer; it cannot be exported
+                # on its own, and skipping quietly would be a lie.
+                failed.append("%s (not selectable in this view layer)" % obj.name)
+                continue
+            context.view_layer.objects.active = obj
+
+            export_dir, filepath, error = _resolve_target(context, project, preset)
+            if error:
+                return False, error, None
+
+            ok, message = _export_fbx(context, filepath, kwargs)
+            if ok:
+                written.append(filepath)
+                folder = folder or export_dir
+                _record_history(context, project.name, preset.name, filepath, kwargs)
+            else:
+                failed.append("%s (%s)" % (obj.name, message))
+    finally:
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in originals:
+            try:
+                obj.select_set(True)
+            except RuntimeError:
+                pass
+        context.view_layer.objects.active = original_active
+
+    if not written:
+        return False, "no object exported — %s" % "; ".join(failed), None
+    if failed:
+        return True, "%d file(s), %d failed: %s" % (
+            len(written), len(failed), "; ".join(failed)), folder
+    return True, "%d file(s) in %s" % (len(written), folder), folder
+
+
+def _run_export(context, project, preset):
+    """Perform a preset's export, split or combined. Returns (success, message)."""
     fbx = preset.fbx_settings
     if fbx.use_selection and not context.selected_objects:
         return False, "%s: nothing selected" % preset.name
@@ -126,27 +191,34 @@ def _run_export(context, project, preset):
     if preset.apply_transform_before_export and context.selected_objects:
         try:
             bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-        except RuntimeError:
-            pass
+        except RuntimeError as exc:
+            # Object mode only, and it refuses on multi-user data. Reporting beats
+            # exporting something the user believes was transformed and was not.
+            return False, "%s: could not apply transforms (%s)" % (preset.name, exc)
 
     kwargs = {key: getattr(fbx, key) for key in FBX_SETTING_KEYS}
-    ok, message = _export_fbx(context, filepath, kwargs)
+
+    # Splitting only means anything when the export set is the selection; with
+    # "visible" or "active collection" there is no per-object set to walk.
+    if preset.split_per_object and fbx.use_selection:
+        ok, message, folder = _export_per_object(context, project, preset, kwargs)
+    else:
+        ok, message, folder = _export_single(context, project, preset, kwargs)
+
     if not ok:
         return False, "%s: %s" % (preset.name, message)
 
-    _record_history(context, project.name, preset.name, filepath, kwargs)
-
     if preset.auto_increment_version:
         preset.version += 1
-    if preset.open_folder_after_export:
+    if preset.open_folder_after_export and folder:
         try:
-            bpy.ops.wm.path_open(filepath=export_dir)
+            bpy.ops.wm.path_open(filepath=folder)
         except RuntimeError:
             pass
     # An export is the natural checkpoint: it is also the point at which the
     # version counter and the history list have just changed.
     save_preferences()
-    return True, filepath
+    return True, message
 
 
 # --------------------------------------------------------------------------- #

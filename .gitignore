@@ -197,3 +197,4 @@ cython_debug/
 # still live under docs/ and be committed normally.
 /docs/ai/
 /docs/handoff/
+/docs/research/

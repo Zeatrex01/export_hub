@@ -50,7 +50,7 @@ FBX_SETTING_KEYS = [
 PRESET_KEYS = [
     "name", "export_dir", "filename_template", "version",
     "auto_increment_version", "apply_transform_before_export",
-    "open_folder_after_export",
+    "open_folder_after_export", "split_per_object",
 ]
 
 
@@ -153,6 +153,15 @@ class EXH_ExportPreset(bpy.types.PropertyGroup):
         description=(
             "Output name without extension. Tokens: {project} {preset} {blend} "
             "{object} {collection} {scene} {date} {time} {version}"
+        ),
+    )
+    split_per_object: BoolProperty(
+        name="One file per object",
+        default=False,
+        description=(
+            "Export each selected object to its own FBX instead of one combined file. "
+            "The filename template must contain {object}, otherwise every object would "
+            "be written to the same path"
         ),
     )
     version: IntProperty(name="Version", default=1, min=0)

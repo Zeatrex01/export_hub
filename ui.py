@@ -304,6 +304,15 @@ def draw_preferences(prefs, context):
     row = dst.row(align=True)
     row.prop(preset, "version")
     row.prop(preset, "auto_increment_version", toggle=True)
+
+    split = dst.row()
+    # Splitting without {object} writes every object to one path, so make the
+    # requirement visible at the switch rather than only at export time.
+    split.alert = preset.split_per_object and "{object}" not in (preset.filename_template or "")
+    split.prop(preset, "split_per_object")
+    if split.alert:
+        dst.label(text="Add {object} to the filename template", icon='ERROR')
+
     dst.prop(preset, "apply_transform_before_export")
     dst.prop(preset, "open_folder_after_export")
 
@@ -413,6 +422,9 @@ class EXH_PT_quick(bpy.types.Panel):
         box = layout.box()
         box.label(text="Options", icon='TOOL_SETTINGS')
         box.prop(fbx, "use_selection")
+        row = box.row()
+        row.enabled = fbx.use_selection
+        row.prop(preset, "split_per_object")
         box.prop(preset, "apply_transform_before_export")
         box.prop(preset, "open_folder_after_export")
 

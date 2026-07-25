@@ -31,6 +31,10 @@ _ANGLE_TOLERANCE = math.radians(0.05)
 # engine presets translate into the engine's own forward axis.
 FORWARD_CONVENTION = "-Y"
 
+# Rates engines and DCC tools actually deal in. Anything else is almost always
+# a scene that was set up by accident.
+_STANDARD_FRAME_RATES = (24, 25, 30, 48, 50, 60, 120)
+
 # Worst first — the panel lists them in this order.
 _SEVERITY = {'ERROR': 0, 'WARNING': 1, 'INFO': 2, 'OK': 3}
 
@@ -67,6 +71,61 @@ def check_transform(name, scale, rotation_euler):
         checks.append(Check('OK', "%s: rotation applied (0°, 0°, 0°)" % name))
 
     return checks
+
+
+def check_scene_units(unit_scale):
+    """Scene unit scale, the most common cause of an asset arriving at the wrong size.
+
+    Engines read one Blender unit as one metre. A scene authored at unit scale
+    0.01 exports geometry that is right in Blender and 100x off in the engine,
+    and nothing in the viewport hints at it.
+    """
+    if abs(unit_scale - 1.0) > _SCALE_TOLERANCE:
+        return [Check(
+            'WARNING',
+            "Scene unit scale is %.4f, not 1.0 — the engine reads 1 Blender unit as "
+            "1 metre, so everything will import at the wrong size" % unit_scale,
+        )]
+    return [Check('OK', "Scene unit scale is 1.0 (1 unit = 1 metre)")]
+
+
+def check_frame_rate(fps):
+    """Flag a frame rate that is not one of the rates engines expect."""
+    if round(fps) not in _STANDARD_FRAME_RATES:
+        return [Check(
+            'WARNING',
+            "Scene frame rate is %g fps — engines expect one of %s, and animation "
+            "sampled at an odd rate lands with drifting keys"
+            % (fps, ", ".join(str(r) for r in _STANDARD_FRAME_RATES)),
+        )]
+    return [Check('OK', "Scene frame rate is %g fps" % fps)]
+
+
+def check_root_bones(name, root_bone_names):
+    """More than one parentless bone confuses every engine importer."""
+    if not root_bone_names:
+        return [Check('ERROR', "%s: armature has no bones" % name)]
+    if len(root_bone_names) > 1:
+        return [Check(
+            'WARNING',
+            "%s: %d root bones (%s) — engines take one as the root and reparent "
+            "the rest, usually not the way you meant"
+            % (name, len(root_bone_names), ", ".join(sorted(root_bone_names)[:4])),
+        )]
+    return [Check('OK', "%s: single root bone '%s'" % (name, root_bone_names[0]))]
+
+
+def check_split_template(split_enabled, template):
+    """Splitting without {object} would write every object to one path."""
+    if not split_enabled:
+        return []
+    if "{object}" not in (template or ""):
+        return [Check(
+            'ERROR',
+            "One file per object is on, but the filename template has no {object} — "
+            "every object would overwrite the same file",
+        )]
+    return [Check('OK', "One file per object, named from {object}")]
 
 
 def check_mesh(name, polygon_count, uv_layer_count):
@@ -188,15 +247,24 @@ def run(context, project, preset):
 
     # State the terms of the check, so a clean result is readable as "these
     # things were examined" rather than an unexplained thumbs up.
+    splitting = bool(getattr(preset, "split_per_object", False)) and from_selection
     checks = [Check(
         'INFO',
-        "Checked %d %s against '%s' — exporting %s%s"
+        "Checked %d %s against '%s' — exporting %s%s%s"
         % (len(objects),
            "selected object(s)" if from_selection else "scene object(s)",
            preset.name,
            ", ".join(sorted(types_exported)) or "nothing",
-           ", animation baked" if wants_anim else ""),
+           ", animation baked" if wants_anim else "",
+           ", one file per object" if splitting else ""),
     )]
+
+    # Scene-wide settings first: they invalidate every object at once, so seeing
+    # them at the top explains any per-object weirdness underneath.
+    checks.extend(check_scene_units(scene.unit_settings.scale_length))
+    if wants_anim:
+        checks.extend(check_frame_rate(scene.render.fps))
+    checks.extend(check_split_template(splitting, preset.filename_template))
 
     considered = 0
     for obj in objects:
@@ -213,6 +281,8 @@ def run(context, project, preset):
 
         elif obj.type == 'ARMATURE':
             checks.extend(check_rig_facing(obj.name, obj.rotation_euler[2]))
+            roots = [b.name for b in obj.data.bones if b.parent is None]
+            checks.extend(check_root_bones(obj.name, roots))
             if wants_anim:
                 action = getattr(getattr(obj, "animation_data", None), "action", None)
                 checks.extend(check_animation(

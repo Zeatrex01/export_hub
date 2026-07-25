@@ -33,6 +33,7 @@ Project "Unity"                 Project "Unreal"
 - **Filename templates** — build output names from tokens like `{blend}`, `{object}`, `{date}`.
 - **Validate before export** — catch unapplied transforms, missing UVs, mirrored objects
   and clipped animation ranges before they reach the engine.
+- **One file per object** — optionally split the selection so every object exports separately.
 - **Export All** — run every enabled preset in a project in one click.
 - **Export history** — the last 50 exports, each re-runnable with the exact settings used.
 - **Shareable config** — export projects and presets to JSON, import them on another machine.
@@ -123,12 +124,22 @@ only care about what is wrong.
 | Nothing selected to export | error |
 | Negative scale — faces import inside out | error |
 | Mesh has no faces | error |
+| Armature has no bones | error |
 | Animation preset, but the rig has no action | error |
+| One file per object is on, but the filename has no `{object}` | error |
+| Scene unit scale is not 1.0 | warning |
 | Scale or rotation not applied | warning |
 | Non-uniform scale | warning |
 | Mesh has no UV map | warning |
+| Rig has more than one root bone | warning |
 | Rig is yawed away from the `-Y` forward convention | warning |
+| Scene frame rate is not a standard rate | warning |
 | Action is longer than the scene frame range, so the bake will cut it | warning |
+
+Scene-wide checks come first, because a wrong unit scale invalidates every object under it at
+once. Unit scale is the one worth reading twice: engines treat one Blender unit as one metre, so
+a scene authored at 0.01 looks correct in Blender and arrives 100× off, with nothing in the
+viewport hinting at it.
 
 That last one is worth knowing about: the FBX exporter bakes over the **scene** frame range,
 not the action's, so an action running past `frame_end` exports truncated with no warning from
@@ -139,6 +150,16 @@ actually knowable from the file. Whether the character *model* was sculpted faci
 way cannot be read out of geometry — no tool can tell you where a face is pointing — so that
 one stays a human check. The convention the engine presets assume is: characters face `-Y` in
 Blender, unrotated.
+
+## One file per object
+
+Prop libraries usually want one FBX per asset, not one FBX containing everything. Turn on
+**One file per object** in a preset and the selection is walked one object at a time, each
+exported separately and each recorded in history.
+
+The filename template must contain `{object}` — without it every object would resolve to the
+same path and only the last would survive, so the add-on refuses rather than quietly
+overwriting. The selection and the active object are restored afterwards.
 
 ## Sharing configuration
 
@@ -175,11 +196,35 @@ a whitelist, so local notes and tooling can never leak into a release — and wr
 layout Blender's installer expects. It prints the archive contents so you can see exactly what
 shipped.
 
+## Author
+
+Made by **Malik3D**.
+
+- Source and issues: <https://github.com/Zeatrex01/export_hub>
+- YouTube: <https://www.youtube.com/c/Zeatrex/>
+
+## License
+
+**GNU General Public License v3.0 or later.** The full text is in [LICENSE](LICENSE).
+
+In plain terms:
+
+- **Using it costs you nothing and requires nothing.** Export whatever you like, commercially or
+  not. Files you export are yours — they are not derived from this add-on, and no credit is owed
+  for them.
+- **Building on it does require credit.** Modify the add-on and distribute your version, and you
+  must keep the copyright notice, say what you changed, and release your version under the same
+  licence with its source available.
+
+Blender add-ons import `bpy`, which makes them derivative works of Blender itself, so the licence
+has to be GPL-compatible — this is not a preference, it applies to every Blender add-on.
+
 ## Known limitations
 
 - Fields you type into directly (export folder, filename template) are written to disk on your
   next export or button press. Use **Save Settings** in Preferences to write them immediately.
-- *Apply transforms before export* modifies your scene and does not undo it afterwards.
+- *Apply transforms before export* modifies your scene and does not undo it afterwards. It now
+  reports a failure instead of silently doing nothing, but it is still destructive.
 - Re-exporting from history writes to that entry's original path, so `{date}` and `{version}`
   tokens are not re-resolved — it overwrites the original file rather than producing a new one.
 - Export All refuses to run if two presets resolve to the same output path, rather than
