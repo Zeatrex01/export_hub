@@ -50,7 +50,7 @@ FBX_SETTING_KEYS = [
 PRESET_KEYS = [
     "name", "export_dir", "filename_template", "version",
     "auto_increment_version", "apply_transform_before_export",
-    "open_folder_after_export", "split_per_object",
+    "open_folder_after_export", "split_per_object", "overwrite_mode",
 ]
 
 
@@ -162,6 +162,23 @@ class EXH_ExportPreset(bpy.types.PropertyGroup):
             "Export each selected object to its own FBX instead of one combined file. "
             "The filename template must contain {object}, otherwise every object would "
             "be written to the same path"
+        ),
+    )
+    overwrite_mode: EnumProperty(
+        name="If the file exists",
+        items=[
+            ('OVERWRITE', "Overwrite",
+             "Replace the existing file. This is what the add-on has always done"),
+            ('INCREMENT', "Keep both",
+             "Leave the existing file and write to the next free numbered name: "
+             "Chair.fbx, then Chair_001.fbx, Chair_002.fbx"),
+            ('SKIP', "Skip",
+             "Write nothing and report it, leaving the file on disk untouched"),
+        ],
+        default='OVERWRITE',
+        description=(
+            "What to do when the resolved filename is already on disk. The default "
+            "overwrites, so existing presets keep behaving exactly as before"
         ),
     )
     version: IntProperty(name="Version", default=1, min=0)

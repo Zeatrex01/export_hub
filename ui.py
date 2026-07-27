@@ -305,6 +305,8 @@ def draw_preferences(prefs, context):
     row.prop(preset, "version")
     row.prop(preset, "auto_increment_version", toggle=True)
 
+    dst.prop(preset, "overwrite_mode")
+
     split = dst.row()
     # Splitting without {object} writes every object to one path, so make the
     # requirement visible at the switch rather than only at export time.
@@ -427,6 +429,7 @@ class EXH_PT_quick(bpy.types.Panel):
         row.prop(preset, "split_per_object")
         box.prop(preset, "apply_transform_before_export")
         box.prop(preset, "open_folder_after_export")
+        box.prop(preset, "overwrite_mode")
 
         box = layout.box()
         box.label(text="FBX", icon='EXPORT')
