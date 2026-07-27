@@ -198,3 +198,7 @@ cython_debug/
 /docs/ai/
 /docs/handoff/
 /docs/research/
+
+# PLUT_OS — machine-specific, never commit
+.plutos/local.json
+.plutos/plutos.config.json

@@ -163,6 +163,30 @@ def _resolve_target(context, project, preset, object_name=None, export_dir_overr
     return export_dir, os.path.join(export_dir, filename), None
 
 
+def _apply_overwrite_mode(filepath, mode):
+    """Apply a preset's "the file already exists" policy to a resolved path.
+
+    Returns (filepath, reason). filepath is None when nothing should be written,
+    and reason then says why, so the caller can report a skip instead of
+    counting the preset as exported.
+    """
+    if mode == 'OVERWRITE' or not os.path.exists(filepath):
+        return filepath, None
+
+    name = os.path.basename(filepath)
+    if mode == 'SKIP':
+        return None, "%s already exists" % name
+
+    base, ext = os.path.splitext(filepath)
+    for number in range(1, 1000):
+        candidate = "%s_%03d%s" % (base, number, ext)
+        if not os.path.exists(candidate):
+            return candidate, None
+    # Every numbered name is taken. Refusing beats overwriting a file the user
+    # explicitly asked to keep.
+    return None, "%s already has 999 numbered copies" % name
+
+
 def _supported_fbx_kwargs(kwargs):
     """Drop arguments this Blender's FBX exporter does not accept.
 
@@ -205,7 +229,7 @@ def _export_fbx(context, filepath, kwargs):
 
 
 def _export_single(context, project, preset, kwargs, plan, export_dir_override=None):
-    """Export the whole export set to one file. Returns (ok, message, folder)."""
+    """Export the whole export set to one file. Returns (status, message, folder)."""
     active = context.view_layer.objects.active
     display = next((name for obj, name in plan if obj is active), None)
     if display is None and plan:
@@ -214,31 +238,35 @@ def _export_single(context, project, preset, kwargs, plan, export_dir_override=N
     export_dir, filepath, error = _resolve_target(
         context, project, preset, object_name=display, export_dir_override=export_dir_override)
     if error:
-        return False, error, None
+        return 'FAILED', error, None
+
+    filepath, reason = _apply_overwrite_mode(filepath, preset.overwrite_mode)
+    if filepath is None:
+        return 'SKIPPED', reason, None
 
     ok, message = _export_fbx(context, filepath, kwargs)
     if not ok:
-        return False, message, None
+        return 'FAILED', message, None
 
     _record_history(context, project.name, preset.name, filepath, kwargs)
-    return True, filepath, export_dir
+    return 'DONE', filepath, export_dir
 
 
 def _export_per_object(context, project, preset, kwargs, plan, export_dir_override=None):
-    """Export every object in the plan to its own file. Returns (ok, message, folder).
+    """Export every object in the plan to its own file. Returns (status, message, folder).
 
     The selection is driven one object at a time and put back afterwards: the
     user pressed one button, they should get their scene back exactly as it was,
     including which object was active.
     """
     if "{object}" not in (preset.filename_template or ""):
-        return False, ("split export needs {object} in the filename template, "
-                       "otherwise every object writes to the same file"), None
+        return 'FAILED', ("split export needs {object} in the filename template, "
+                          "otherwise every object writes to the same file"), None
 
     was_selected = list(context.selected_objects)
     was_active = context.view_layer.objects.active
 
-    written, failed, folder = [], [], None
+    written, skipped, failed, folder = [], [], [], None
     try:
         for obj, display in plan:
             bpy.ops.object.select_all(action='DESELECT')
@@ -255,7 +283,14 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
                 context, project, preset, object_name=display,
                 export_dir_override=export_dir_override)
             if error:
-                return False, error, None
+                return 'FAILED', error, None
+
+            # Per object, not per preset: one object already on disk should not
+            # stop the rest of the selection from being written.
+            filepath, reason = _apply_overwrite_mode(filepath, preset.overwrite_mode)
+            if filepath is None:
+                skipped.append(reason)
+                continue
 
             ok, message = _export_fbx(context, filepath, kwargs)
             if ok:
@@ -274,11 +309,16 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
         context.view_layer.objects.active = was_active
 
     if not written:
-        return False, "no object exported — %s" % "; ".join(failed), None
+        if skipped and not failed:
+            return 'SKIPPED', "%d file(s) already exist, nothing written" % len(skipped), None
+        return 'FAILED', "no object exported — %s" % "; ".join(failed + skipped), None
+
+    detail = ""
+    if skipped:
+        detail += ", %d skipped (already exists)" % len(skipped)
     if failed:
-        return True, "%d file(s), %d failed: %s" % (
-            len(written), len(failed), "; ".join(failed)), folder
-    return True, "%d file(s) in %s" % (len(written), folder), folder
+        detail += ", %d failed: %s" % (len(failed), "; ".join(failed))
+    return 'DONE', "%d file(s) in %s%s" % (len(written), folder, detail), folder
 
 
 def _first_collision(context, project, presets, export_dir_override=None):
@@ -302,10 +342,16 @@ def _first_collision(context, project, presets, export_dir_override=None):
 
 
 def _run_export(context, project, preset, export_dir_override=None):
-    """Perform a preset's export, split or combined. Returns (success, message)."""
+    """Perform a preset's export, split or combined.
+
+    Returns (status, message) where status is 'DONE', 'SKIPPED' (the file was
+    already on disk and the preset asked to keep it) or 'FAILED'. A skip is
+    deliberately not a success: counting it as one would report an export the
+    user never got.
+    """
     fbx = preset.fbx_settings
     if fbx.use_selection and not context.selected_objects:
-        return False, "%s: nothing selected" % preset.name
+        return 'FAILED', "%s: nothing selected" % preset.name
 
     kwargs = {key: getattr(fbx, key) for key in FBX_SETTING_KEYS}
 
@@ -326,17 +372,19 @@ def _run_export(context, project, preset, export_dir_override=None):
     try:
         if on_copies:
             with _transformed_copies(context, list(context.selected_objects)) as mapping:
-                ok, message, folder = _export(mapping)
+                status, message, folder = _export(mapping)
         else:
-            ok, message, folder = _export(None)
+            status, message, folder = _export(None)
     except RuntimeError as exc:
         # Duplication or transform_apply refused — object mode only, and it
         # baulks at library data. Reporting beats exporting something the user
         # believes was transformed and was not.
-        return False, "%s: could not apply transforms (%s)" % (preset.name, exc)
+        return 'FAILED', "%s: could not apply transforms (%s)" % (preset.name, exc)
 
-    if not ok:
-        return False, "%s: %s" % (preset.name, message)
+    if status != 'DONE':
+        # Nothing was written, so nothing downstream should run: no version
+        # bump for an export that did not happen, and no folder to open.
+        return status, "%s: %s" % (preset.name, message)
 
     if preset.auto_increment_version:
         preset.version += 1
@@ -348,7 +396,34 @@ def _run_export(context, project, preset, export_dir_override=None):
     # An export is the natural checkpoint: it is also the point at which the
     # version counter and the history list have just changed.
     save_preferences()
-    return True, message
+    return 'DONE', message
+
+
+def _run_presets(context, project, presets, export_dir_override=None):
+    """Run several presets in order. Returns (done, skipped, failed_messages)."""
+    done, skipped, failed = 0, 0, []
+    for preset in presets:
+        status, message = _run_export(context, project, preset, export_dir_override)
+        if status == 'DONE':
+            done += 1
+        elif status == 'SKIPPED':
+            skipped += 1
+        else:
+            failed.append(message)
+    return done, skipped, failed
+
+
+def _report_run(operator, project, done, skipped, failed):
+    """Report a multi-preset run, naming everything that did not get written."""
+    summary = "%d exported" % done
+    if skipped:
+        summary += ", %d skipped (file exists)" % skipped
+    if failed:
+        operator.report({'WARNING'}, "%s, %d failed: %s"
+                        % (summary, len(failed), "; ".join(failed)))
+    else:
+        level = {'INFO'} if done else {'WARNING'}
+        operator.report(level, "%s from '%s'" % (summary, project.name))
 
 
 # --------------------------------------------------------------------------- #
@@ -759,9 +834,14 @@ class EXH_OT_export(bpy.types.Operator):
         if preset is None:
             self.report({'ERROR'}, "No preset selected")
             return {'CANCELLED'}
-        ok, message = _run_export(context, project, preset)
-        self.report({'INFO'} if ok else {'ERROR'}, message if ok else "Failed: " + message)
-        return {'FINISHED'} if ok else {'CANCELLED'}
+        status, message = _run_export(context, project, preset)
+        if status == 'FAILED':
+            self.report({'ERROR'}, "Failed: " + message)
+            return {'CANCELLED'}
+        # A skip is the preset doing what it was told, not an error — but it is
+        # a warning, because the user pressed Export and got no new file.
+        self.report({'WARNING'} if status == 'SKIPPED' else {'INFO'}, message)
+        return {'FINISHED'}
 
 
 class EXH_OT_history_reexport(bpy.types.Operator):
@@ -990,26 +1070,19 @@ class EXH_OT_export_dialog(bpy.types.Operator):
                 self.report({'ERROR'}, collision)
                 return {'CANCELLED'}
 
-            done, failed = 0, []
-            for p in enabled:
-                ok, message = _run_export(context, project, p, override)
-                if ok:
-                    done += 1
-                else:
-                    failed.append(message)
-            if failed:
-                self.report({'WARNING'}, "%d exported, %d failed: %s"
-                            % (done, len(failed), "; ".join(failed)))
-            else:
-                self.report({'INFO'}, "Exported %d preset(s) from '%s'" % (done, project.name))
+            done, skipped, failed = _run_presets(context, project, enabled, override)
+            _report_run(self, project, done, skipped, failed)
             return {'FINISHED'}
 
         if preset is None:
             self.report({'ERROR'}, "No preset selected")
             return {'CANCELLED'}
-        ok, message = _run_export(context, project, preset, override)
-        self.report({'INFO'} if ok else {'ERROR'}, message if ok else "Failed: " + message)
-        return {'FINISHED'} if ok else {'CANCELLED'}
+        status, message = _run_export(context, project, preset, override)
+        if status == 'FAILED':
+            self.report({'ERROR'}, "Failed: " + message)
+            return {'CANCELLED'}
+        self.report({'WARNING'} if status == 'SKIPPED' else {'INFO'}, message)
+        return {'FINISHED'}
 
 
 class EXH_OT_export_all(bpy.types.Operator):
@@ -1042,18 +1115,8 @@ class EXH_OT_export_all(bpy.types.Operator):
             self.report({'ERROR'}, collision)
             return {'CANCELLED'}
 
-        done, failed = 0, []
-        for preset in enabled:
-            ok, message = _run_export(context, project, preset)
-            if ok:
-                done += 1
-            else:
-                failed.append(message)
-
-        if failed:
-            self.report({'WARNING'}, "%d exported, %d failed: %s" % (done, len(failed), "; ".join(failed)))
-        else:
-            self.report({'INFO'}, "Exported %d preset(s) from '%s'" % (done, project.name))
+        done, skipped, failed = _run_presets(context, project, enabled)
+        _report_run(self, project, done, skipped, failed)
         return {'FINISHED'}
 
 

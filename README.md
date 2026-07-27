@@ -34,6 +34,7 @@ Project "Unity"                 Project "Unreal"
 - **Validate before export** — catch unapplied transforms, missing UVs, mirrored objects
   and clipped animation ranges before they reach the engine.
 - **One file per object** — optionally split the selection so every object exports separately.
+- **Your call on existing files** — per preset: overwrite, keep both, or skip.
 - **Export All** — run every enabled preset in a project in one click.
 - **Export history** — the last 50 exports, each re-runnable with the exact settings used.
 - **Shareable config** — export projects and presets to JSON, import them on another machine.
@@ -194,6 +195,25 @@ The filename template must contain `{object}` — without it every object would 
 same path and only the last would survive, so the add-on refuses rather than quietly
 overwriting. The selection and the active object are restored afterwards.
 
+## When the file already exists
+
+Every preset carries an **If the file exists** setting, because there is no single right answer:
+a prop you are iterating on wants to be replaced, a delivered asset does not.
+
+| Mode | What happens |
+|---|---|
+| **Overwrite** | The existing file is replaced. This is the default and the long-standing behaviour. |
+| **Keep both** | The existing file is left alone and the export goes to the next free numbered name: `Chair.fbx`, then `Chair_001.fbx`, `Chair_002.fbx`. |
+| **Skip** | Nothing is written and the export says so. |
+
+A skipped export is reported as a skip, never as a success — Export All counts exported, skipped
+and failed presets separately, so "3 exported" always means three files were actually written.
+Nothing else runs for a preset that wrote nothing: the version counter does not bump and the
+export folder does not open.
+
+With **One file per object** the policy applies per object, so one asset already on disk does not
+stop the rest of the selection from exporting.
+
 ## Sharing configuration
 
 **Preferences → Export Config to JSON** writes every project and preset to a file. Import it
@@ -260,8 +280,10 @@ has to be GPL-compatible — this is not a preference, it applies to every Blend
   the selection.
 - Re-exporting from history writes to that entry's original path, so `{date}` and `{version}`
   tokens are not re-resolved — it overwrites the original file rather than producing a new one.
+  The **If the file exists** policy does not apply here: you picked a specific file to write again.
 - Export All refuses to run if two presets resolve to the same output path, rather than
   letting one silently overwrite the other. Add `{preset}` to the filename template to
-  separate them; projects created from an engine template already do.
+  separate them; projects created from an engine template already do. This is about the preset
+  configuration, so it applies whatever the **If the file exists** policy is set to.
 - Exporting to a `//` relative folder requires the .blend to be saved first, since there is
   nothing to resolve the path against otherwise.
