@@ -31,7 +31,7 @@ import datetime
 
 import bpy
 
-from . import properties, operators, ui, updates
+from . import properties, operators, ui, updates, validate
 
 _modules = (properties, operators, ui)
 
@@ -68,6 +68,10 @@ def unregister():
         bpy.app.timers.unregister(_startup_update_check)
     updates.unregister_timers()
     bpy.types.TOPBAR_MT_file_export.remove(ui.menu_func_export)
+    # Module state, so it outlives the add-on without this. It still survives
+    # File > Open — a result from another .blend can be on screen until the user
+    # validates again, which the panel's label at least makes visible.
+    validate.clear_result()
 
     for mod in reversed(_modules):
         for cls in reversed(mod.classes):

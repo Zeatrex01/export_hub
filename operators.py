@@ -68,32 +68,59 @@ def _transformed_copies(context, originals):
     one duplicate call rewires those relationships inside the new set.
     """
     previous_active = context.view_layer.objects.active
-
-    # Duplicates inherit custom properties, and that is the only dependable way
-    # to tell which copy came from which original: duplicate() returns no
-    # mapping, and the generated names are not something to parse.
-    for index, obj in enumerate(originals):
-        obj[_COPY_MARKER] = index
-
+    originals_set = set(originals)
     mapping = {}
+    created = []
     try:
+        # Duplicates inherit custom properties, and that is the only dependable way
+        # to tell which copy came from which original: duplicate() returns no
+        # mapping, and the generated names are not something to parse.
+        #
+        # Inside the try, not before it: writing a custom property fails on
+        # library-linked and other read-only objects, and a half-marked selection
+        # still has to be cleaned up. Marking outside the try meant a failure
+        # halfway through left the marker on the user's objects permanently.
+        for index, obj in enumerate(originals):
+            try:
+                obj[_COPY_MARKER] = index
+            except (AttributeError, TypeError) as exc:
+                # Reported as a RuntimeError because that is what _run_export
+                # handles; letting this escape would surface as a raw traceback.
+                raise RuntimeError("cannot tag '%s' for baking (%s)" % (obj.name, exc))
+
         bpy.ops.object.select_all(action='DESELECT')
         for obj in originals:
             obj.select_set(True)
-        context.view_layer.objects.active = originals[0]
+        # duplicate() needs an active object, and the copy of whichever object is
+        # active becomes the new active — which is the one that names the file
+        # downstream. Keeping the user's own active object is what stops baking
+        # from silently changing the export's filename; originals[0] is merely the
+        # first entry of the selection, which is not the active object.
+        context.view_layer.objects.active = (
+            previous_active if previous_active in originals_set else originals[0])
 
         bpy.ops.object.duplicate(linked=False)
 
-        for copy in list(context.selected_objects):
+        # What gets deleted is "everything this call created", never "everything
+        # that got mapped". A copy that fails to map would otherwise stay in the
+        # scene carrying its marker, and an original that duplicate left selected
+        # would otherwise be taken for its own copy — baked in place, then deleted.
+        created = [obj for obj in context.selected_objects if obj not in originals_set]
+
+        for copy in created:
             index = copy.get(_COPY_MARKER)
             if index is None:
                 continue
             del copy[_COPY_MARKER]
             mapping[originals[index]] = copy
 
-        # transform_apply refuses on data shared with anything else.
+        # transform_apply refuses on data shared with anything else. The scope is
+        # spelled out rather than left to the operator's default: any other value
+        # would un-share datablocks across the user's whole scene as a side effect
+        # of an export.
         try:
-            bpy.ops.object.make_single_user(object=True, obdata=True)
+            bpy.ops.object.make_single_user(
+                type='SELECTED_OBJECTS', object=True, obdata=True)
         except RuntimeError:
             pass
 
@@ -107,21 +134,33 @@ def _transformed_copies(context, originals):
 
         yield mapping
     finally:
+        # Every step guards itself. This block now runs on failure paths too, and
+        # one step raising must not skip the ones after it — an aborted marker
+        # cleanup would leave the exact residue this function exists to prevent.
         for obj in originals:
-            if _COPY_MARKER in obj:
-                del obj[_COPY_MARKER]
-        for copy in mapping.values():
+            try:
+                if _COPY_MARKER in obj:
+                    del obj[_COPY_MARKER]
+            except (ReferenceError, RuntimeError):
+                pass
+        for copy in created:
             try:
                 bpy.data.objects.remove(copy, do_unlink=True)
             except (ReferenceError, RuntimeError):
                 pass
-        bpy.ops.object.select_all(action='DESELECT')
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+        except RuntimeError:
+            pass
         for obj in originals:
             try:
                 obj.select_set(True)
             except (ReferenceError, RuntimeError):
                 pass
-        context.view_layer.objects.active = previous_active
+        try:
+            context.view_layer.objects.active = previous_active
+        except (ReferenceError, RuntimeError):
+            pass
 
 
 def _export_plan(context, mapping):
@@ -613,7 +652,7 @@ class EXH_OT_validate(bpy.types.Operator):
             return {'CANCELLED'}
 
         checks = validate.run(context, project, preset)
-        validate.store_result(preset.name, checks)
+        validate.store_result(project.name, preset.name, checks)
         errors, warnings, passed = validate.summarise(checks)
 
         if errors:

@@ -234,23 +234,50 @@ def sort_for_display(checks):
 # --------------------------------------------------------------------------- #
 
 # Set by the operator, read by the panel.
-_last_result = {"checks": [], "preset": "", "ran": False}
+_last_result = {"checks": [], "project": "", "preset": "", "ran": False}
 
 
 def last_result():
     return dict(_last_result, checks=list(_last_result["checks"]))
 
 
-def store_result(preset_name, checks):
+def store_result(project_name, preset_name, checks):
     _last_result["checks"] = list(checks)
+    _last_result["project"] = project_name
     _last_result["preset"] = preset_name
     _last_result["ran"] = True
 
 
 def clear_result():
     _last_result["checks"] = []
+    _last_result["project"] = ""
     _last_result["preset"] = ""
     _last_result["ran"] = False
+
+
+def result_matches(result, project_name, preset_name):
+    """True when a stored result describes this project's preset.
+
+    Keyed on names rather than indices on purpose: a preset carries no stable
+    identity, and move, remove, duplicate and JSON import all reorder the
+    collections, so an index would quietly re-point at a different preset — worse
+    than the staleness it was meant to fix, because it would look right.
+
+    The project name is part of the key because projects created from an engine
+    template name their presets after the variant: "Static Mesh" exists
+    identically under Unity, Unreal and Godot.
+
+    An empty name on either side means there is nothing to compare, and returning
+    a mismatch there would be inventing a verdict the data does not support.
+    """
+    stored_preset = result.get("preset", "")
+    if not stored_preset or not preset_name:
+        return True
+
+    stored_project = result.get("project", "")
+    if stored_project and project_name and stored_project != project_name:
+        return False
+    return stored_preset == preset_name
 
 
 def run(context, project, preset):

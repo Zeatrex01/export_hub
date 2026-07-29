@@ -12,10 +12,16 @@ _CHECK_ICONS = {
 }
 
 
-def _draw_validation(layout, prefs):
+def _draw_validation(layout, prefs, project_name="", preset_name=""):
     """Show the last validation run — what passed as well as what did not.
 
-    Nothing is drawn until the user asks for a run.
+    Nothing is drawn until the user asks for a run, and a result is never hidden
+    or cleared when the user moves to another preset: it is work they asked for,
+    and dropping it would also remove the only way to compare two presets. It gets
+    labelled instead, and says so when it no longer describes what is selected.
+
+    Read-only by contract. This runs inside a draw callback, where mutating state
+    — clearing the result, writing a property — is undefined behaviour in Blender.
     """
     result = validate.last_result()
     if not result["ran"]:
@@ -23,6 +29,7 @@ def _draw_validation(layout, prefs):
 
     checks = validate.sort_for_display(result["checks"])
     errors, warnings, passed = validate.summarise(checks)
+    describes_active = validate.result_matches(result, project_name, preset_name)
 
     box = layout.box()
     header = box.row(align=True)
@@ -37,6 +44,26 @@ def _draw_validation(layout, prefs):
     header.prop(prefs, "show_passed_checks", text="",
                 icon='HIDE_OFF' if prefs.show_passed_checks else 'HIDE_ON')
     header.operator("export_hub.clear_validation", text="", icon='X', emboss=False)
+
+    # Name the run the counts above belong to. Its own row, not the header: the
+    # header already turns red for errors, and two meanings on one alert row
+    # cannot be told apart. The wording stays descriptive — the selection may
+    # have changed since the run and there is no way to know, so this must not
+    # read as a claim that the result is current.
+    subtitle = box.row()
+    if result["project"]:
+        summary = "Validated '%s' in '%s'" % (result["preset"], result["project"])
+    else:
+        summary = "Validated '%s'" % result["preset"]
+    if not describes_active:
+        subtitle.alert = True
+        # Name the project on both sides. Engine templates give every project a
+        # preset called "Static Mesh", so "validated 'Static Mesh', active preset
+        # is 'Static Mesh'" is the common case and reads as a contradiction.
+        active = ("'%s' in '%s'" % (preset_name, project_name) if project_name
+                  else "'%s'" % preset_name)
+        summary += "  —  active is %s, validate again" % active
+    subtitle.label(text=summary, icon='INFO')
 
     hidden = 0
     column = box.column(align=True)
@@ -362,8 +389,10 @@ class EXH_PT_export(bpy.types.Panel):
                              project, "active_preset_index", rows=3)
 
         pidx = project.active_preset_index
+        preset_name = ""
         if 0 <= pidx < len(project.presets):
             preset = project.presets[pidx]
+            preset_name = preset.name
             col = layout.column(align=True)
             col.label(text=preset.export_dir or "(no folder set)", icon='FILE_FOLDER')
             # Editable output name + token picker.
@@ -373,7 +402,7 @@ class EXH_PT_export(bpy.types.Panel):
 
         layout.separator()
         layout.operator("export_hub.validate", text="Validate", icon='CHECKMARK')
-        _draw_validation(layout, prefs)
+        _draw_validation(layout, prefs, project.name, preset_name)
 
         row = layout.row()
         row.scale_y = 1.7
