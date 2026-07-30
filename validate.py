@@ -35,6 +35,27 @@ FORWARD_CONVENTION = "-Y"
 # a scene that was set up by accident.
 _STANDARD_FRAME_RATES = (24, 25, 30, 48, 50, 60, 120)
 
+# Compared with a tolerance rather than by rounding. Blender stores 23.976 fps as
+# fps=24 with fps_base=1.001, and rounding the real rate back to 24 is exactly
+# how an NTSC scene — the case this rule exists to catch — used to pass.
+_FPS_TOLERANCE = 0.01
+
+# Which object_types entry the FBX exporter files each Blender type under.
+# Curves, text, metaballs and surfaces are converted to meshes on the way out but
+# the exporter counts them as OTHER, not MESH, so the mapping cannot be skipped.
+_FBX_TYPE_OF = {
+    'MESH': 'MESH',
+    'ARMATURE': 'ARMATURE',
+    'EMPTY': 'EMPTY',
+    'CAMERA': 'CAMERA',
+    'LIGHT': 'LIGHT',
+}
+
+# Types where Ctrl+A has something to bake the transform into. An empty, a camera
+# or a light carries no data, so "apply the rotation" there is advice that cannot
+# be followed — and the exported transform of an empty is usually deliberate.
+_TRANSFORMABLE = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'ARMATURE', 'LATTICE'}
+
 # Worst first — the panel lists them in this order.
 _SEVERITY = {'ERROR': 0, 'WARNING': 1, 'INFO': 2, 'OK': 3}
 
@@ -112,8 +133,14 @@ def check_scene_units(unit_scale):
 
 
 def check_frame_rate(fps):
-    """Flag a frame rate that is not one of the rates engines expect."""
-    if round(fps) not in _STANDARD_FRAME_RATES:
+    """Flag a frame rate that is not one of the rates engines expect.
+
+    `fps` is the *effective* rate, fps/fps_base, not Blender's integer fps field.
+    The two differ for exactly the rates worth flagging: Blender's "23.98 fps"
+    preset is fps=24 with fps_base=1.001, and reading the integer alone reports a
+    clean 24.
+    """
+    if not any(abs(fps - rate) <= _FPS_TOLERANCE for rate in _STANDARD_FRAME_RATES):
         return [Check(
             'WARNING',
             "Scene frame rate is %g fps — engines expect one of %s, and animation "
@@ -121,6 +148,11 @@ def check_frame_rate(fps):
             % (fps, ", ".join(str(r) for r in _STANDARD_FRAME_RATES)),
         )]
     return [Check('OK', "Scene frame rate is %g fps" % fps)]
+
+
+def exported_as(object_type):
+    """The object_types entry the FBX exporter files this Blender type under."""
+    return _FBX_TYPE_OF.get(object_type, 'OTHER')
 
 
 def check_root_bones(name, root_bone_names):
@@ -280,6 +312,41 @@ def result_matches(result, project_name, preset_name):
     return stored_preset == preset_name
 
 
+def _mesh_counts(context, obj, use_modifiers):
+    """(polygon_count, uv_layer_count) as the exporter will actually see them.
+
+    With Apply Modifiers on, the FBX exporter writes the *evaluated* mesh, so
+    counting faces on the base mesh reports "no faces — nothing to export" for
+    anything whose geometry is generated: a Skin modifier, geometry nodes, a
+    mirrored half, a Boolean. Those export perfectly well.
+
+    Falls back to the base mesh if evaluation is unavailable, which is the honest
+    answer when the depsgraph cannot be reached rather than a guess.
+    """
+    mesh = obj.data
+    if not use_modifiers:
+        return len(mesh.polygons), len(mesh.uv_layers)
+
+    evaluated = None
+    try:
+        evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
+        eval_mesh = evaluated.to_mesh()
+    except (AttributeError, RuntimeError):
+        return len(mesh.polygons), len(mesh.uv_layers)
+
+    try:
+        if eval_mesh is None:
+            return len(mesh.polygons), len(mesh.uv_layers)
+        return len(eval_mesh.polygons), len(eval_mesh.uv_layers)
+    finally:
+        # to_mesh() owns a temporary datablock; it has to be released on the same
+        # object it came from, on every path out of here.
+        try:
+            evaluated.to_mesh_clear()
+        except (AttributeError, RuntimeError):
+            pass
+
+
 def run(context, project, preset):
     """Validate the current selection against one preset. Returns [Check]."""
     fbx = preset.fbx_settings
@@ -320,22 +387,25 @@ def run(context, project, preset):
     # them at the top explains any per-object weirdness underneath.
     checks.extend(check_scene_units(scene.unit_settings.scale_length))
     if wants_anim:
-        checks.extend(check_frame_rate(scene.render.fps))
+        # The effective rate, not the integer field — see check_frame_rate.
+        checks.extend(check_frame_rate(scene.render.fps / (scene.render.fps_base or 1.0)))
     checks.extend(check_split_template(splitting, preset.filename_template))
 
     considered = 0
     for obj in objects:
-        if obj.type not in types_exported and obj.type in {'MESH', 'ARMATURE'}:
-            # Not part of this preset's payload; its transform cannot break it.
+        if exported_as(obj.type) not in types_exported:
+            # Not part of this preset's payload; nothing about it can break the
+            # export, and reporting on it buries the objects that can.
             continue
         considered += 1
 
-        checks.extend(check_transform(
-            obj.name, tuple(obj.scale), tuple(obj.rotation_euler), baked_on_export=baking))
+        if obj.type in _TRANSFORMABLE:
+            checks.extend(check_transform(
+                obj.name, tuple(obj.scale), tuple(obj.rotation_euler), baked_on_export=baking))
 
         if obj.type == 'MESH':
-            mesh = obj.data
-            checks.extend(check_mesh(obj.name, len(mesh.polygons), len(mesh.uv_layers)))
+            polygons, uv_layers = _mesh_counts(context, obj, bool(fbx.use_mesh_modifiers))
+            checks.extend(check_mesh(obj.name, polygons, uv_layers))
 
         elif obj.type == 'ARMATURE':
             checks.extend(check_rig_facing(obj.name, obj.rotation_euler[2]))
@@ -358,7 +428,12 @@ def run(context, project, preset):
             "the export would be empty",
         ))
 
-    if wants_anim and not any(o.type == 'ARMATURE' for o in objects):
+    # "In the export set" means both selected *and* covered by object_types — a
+    # preset that bakes animation while filtering armatures out has nothing to
+    # bake either way, and that is the harder mistake to spot in the UI.
+    armature_exported = ('ARMATURE' in types_exported
+                         and any(o.type == 'ARMATURE' for o in objects))
+    if wants_anim and not armature_exported:
         checks.append(Check(
             'WARNING',
             "This preset bakes animation but no armature is in the export set",
