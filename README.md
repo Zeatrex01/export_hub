@@ -86,8 +86,12 @@ The output name is built from tokens, so exports stay consistently named without
 | `{version}` | `v001`, from the preset's version counter |
 
 `{blend}_{preset}` gives `Character_Skeletal Mesh.fbx`. The panel shows a live preview of the
-resolved name before you export. Characters that are illegal in filenames are replaced
-automatically.
+resolved name before you export.
+
+Names are made safe for the filesystem automatically: illegal characters are replaced, trailing
+dots and spaces are trimmed (Windows drops those silently, which would land the file under a
+different name than the one you were shown), reserved device names like `CON` and `NUL` get a
+suffix, and very long names are capped so the `.fbx` extension and a `_001` suffix still fit.
 
 ## Engine templates
 
@@ -147,11 +151,28 @@ only care about what is wrong.
 | Rig is yawed away from the `-Y` forward convention | warning |
 | Scene frame rate is not a standard rate | warning |
 | Action is longer than the scene frame range, so the bake will cut it | warning |
+| Animation preset, but no armature is in the export set | warning |
+| None of the selected objects match the preset's object types | warning |
+
+**Only what the preset actually exports is checked.** A preset limited to meshes says nothing
+about a camera or a light you happen to have selected — they are not going into the file, so a
+warning about their transforms would only bury the objects that are. Object types are matched the
+way the FBX exporter matches them, so curves, text and metaballs count as *Other* rather than as
+meshes.
 
 Scene-wide checks come first, because a wrong unit scale invalidates every object under it at
 once. Unit scale is the one worth reading twice: engines treat one Blender unit as one metre, so
 a scene authored at 0.01 looks correct in Blender and arrives 100× off, with nothing in the
 viewport hinting at it.
+
+The frame rate is read as the **effective** rate, `fps / fps_base`, not Blender's integer field.
+Blender stores its 23.98 fps preset as 24 with a base of 1.001, so reading the integer alone
+reported a clean 24 for exactly the NTSC scene this check exists to catch.
+
+Face and UV counts come from the mesh **as the exporter will write it**. With *Apply Modifiers*
+on that is the evaluated mesh, so geometry produced by a Skin modifier, a Mirror, a Boolean or
+geometry nodes is counted — reading the base mesh reported "no faces" for models that export
+perfectly well.
 
 That last one is worth knowing about: the FBX exporter bakes over the **scene** frame range,
 not the action's, so an action running past `frame_end` exports truncated with no warning from
@@ -180,6 +201,11 @@ The whole selection is duplicated in one step, so parenting and armature-modifie
 the objects survive into the export. Filenames still come from the original object names, not
 from Blender's `Chair.001` duplicate naming. If anything fails partway, the duplicates are
 removed anyway.
+
+If Blender refuses to duplicate part of the selection — linked library data is the usual reason —
+the export is refused outright rather than run on what was left. Exporting the remainder would
+have quietly dropped objects, and with *One file per object* that means an FBX simply missing
+from the folder, which is the kind of gap you only notice once the engine is short an asset.
 
 Validation knows about this: with baking on, an unapplied scale is reported as fine rather than
 as something to go and fix by hand. Negative scale is still an error, since baking it does not
