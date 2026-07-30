@@ -18,6 +18,18 @@ CONFIG_VERSION = 2
 MAX_HISTORY = 50
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Windows refuses these as filenames whatever extension follows, so a template
+# resolving to one of them cannot produce a file at all.
+_RESERVED_NAMES = frozenset(
+    ("CON", "PRN", "AUX", "NUL")
+    + tuple("COM%d" % n for n in range(1, 10))
+    + tuple("LPT%d" % n for n in range(1, 10))
+)
+
+# Leaves room inside the usual 255-byte component limit for ".fbx" and for the
+# "_001" that "Keep both" appends.
+MAX_FILENAME = 200
+
 # (token, human description) — single source of truth for the picker and docs.
 FILENAME_TOKENS = [
     ("project", "Project name"),
@@ -168,7 +180,18 @@ def json_to_fbx_kwargs(text):
 
 
 def sanitize_filename(name):
-    cleaned = _INVALID_FILENAME_CHARS.sub("_", name).strip().strip(".")
+    """Turn a resolved template into a name the filesystem will actually accept."""
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", name).lstrip()[:MAX_FILENAME]
+
+    # Trailing dots and spaces are trimmed in a loop rather than with one
+    # strip().strip("."): "Chair. ." kept its trailing space that way, and Windows
+    # silently drops trailing spaces and dots from a path — the file would land
+    # under a name the add-on had already reported as something else.
+    while cleaned and cleaned[-1] in " .":
+        cleaned = cleaned[:-1]
+
+    if cleaned.upper() in _RESERVED_NAMES:
+        cleaned += "_"
     return cleaned or "export"
 
 

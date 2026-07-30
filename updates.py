@@ -139,6 +139,24 @@ def start_check():
     return True
 
 
+def reset():
+    """Forget any in-flight or finished check.
+
+    Called on both register and unregister. `_state` is module state and the
+    module object survives an add-on disable, so a check that happened to be in
+    flight at that moment left the status on "checking" forever — and every later
+    check then refused to start with "Already checking".
+
+    A worker from the disabled session can still land its result here afterwards.
+    That is harmless: it compares the same repository against the same bl_info
+    version, so the answer is the one a fresh check would give.
+    """
+    with _lock:
+        _state["status"] = "idle"
+        _state["latest"] = None
+        _state["message"] = ""
+
+
 def unregister_timers():
     """Drop the redraw timer so disabling the add-on leaves nothing behind."""
     if bpy.app.timers.is_registered(_redraw_when_done):

@@ -57,6 +57,9 @@ def register():
         for cls in mod.classes:
             bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_export.append(ui.menu_func_export)
+    # Module state outlives a disable, so a check left mid-flight last time would
+    # otherwise still read as "in progress" and block every new one.
+    updates.reset()
     bpy.app.timers.register(_startup_update_check, first_interval=5.0)
 
 
@@ -67,6 +70,7 @@ def unregister():
     if bpy.app.timers.is_registered(_startup_update_check):
         bpy.app.timers.unregister(_startup_update_check)
     updates.unregister_timers()
+    updates.reset()
     bpy.types.TOPBAR_MT_file_export.remove(ui.menu_func_export)
     # Module state, so it outlives the add-on without this. It still survives
     # File > Open — a result from another .blend can be on screen until the user
