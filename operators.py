@@ -54,6 +54,21 @@ def _record_history(context, project_name, preset_name, filepath, kwargs):
 _COPY_MARKER = "_export_hub_source_index"
 
 
+def _deselect_all():
+    """Clear the selection, saying what happened when Blender refuses.
+
+    select_all needs object mode, and its bare poll failure reads as a note about
+    an incorrect context — which does not tell the user that leaving edit mode is
+    what fixes it.
+    """
+    try:
+        bpy.ops.object.select_all(action='DESELECT')
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "could not change the selection, which an export needs to do — leave "
+            "edit mode and try again (%s)" % exc)
+
+
 @contextlib.contextmanager
 def _transformed_copies(context, originals):
     """Yield {original: copy}, where each copy has its transforms applied.
@@ -88,7 +103,7 @@ def _transformed_copies(context, originals):
                 # handles; letting this escape would surface as a raw traceback.
                 raise RuntimeError("cannot tag '%s' for baking (%s)" % (obj.name, exc))
 
-        bpy.ops.object.select_all(action='DESELECT')
+        _deselect_all()
         for obj in originals:
             obj.select_set(True)
         # duplicate() needs an active object, and the copy of whichever object is
@@ -99,7 +114,10 @@ def _transformed_copies(context, originals):
         context.view_layer.objects.active = (
             previous_active if previous_active in originals_set else originals[0])
 
-        bpy.ops.object.duplicate(linked=False)
+        try:
+            bpy.ops.object.duplicate(linked=False)
+        except RuntimeError as exc:
+            raise RuntimeError("could not duplicate the selection for baking (%s)" % exc)
 
         # What gets deleted is "everything this call created", never "everything
         # that got mapped". A copy that fails to map would otherwise stay in the
@@ -113,6 +131,21 @@ def _transformed_copies(context, originals):
                 continue
             del copy[_COPY_MARKER]
             mapping[originals[index]] = copy
+
+        # Refuse rather than export a subset. duplicate() can decline an object
+        # outright — linked library data is the usual reason — and every object it
+        # skipped is missing from the mapping. Carrying on would drop those objects
+        # from a "one file per object" run with nothing on screen to say so, which
+        # is the one failure the user cannot notice until the engine is short an
+        # asset.
+        missing = [obj.name for obj in originals if obj not in mapping]
+        if missing:
+            shown = ", ".join(missing[:4])
+            if len(missing) > 4:
+                shown += " and %d more" % (len(missing) - 4)
+            raise RuntimeError(
+                "could not duplicate %s for baking, so the export would have "
+                "covered only part of the selection" % shown)
 
         # transform_apply refuses on data shared with anything else. The scope is
         # spelled out rather than left to the operator's default: any other value
@@ -130,7 +163,10 @@ def _transformed_copies(context, originals):
         # mesh whose pivot sits at zero with its geometry somewhere else, so the
         # prop rotates around a point it is nowhere near. The pivot is the
         # artist's decision; this only cleans up what the engine cares about.
-        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+        try:
+            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+        except RuntimeError as exc:
+            raise RuntimeError("could not bake rotation and scale (%s)" % exc)
 
         yield mapping
     finally:
@@ -308,7 +344,7 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
     written, skipped, failed, folder = [], [], [], None
     try:
         for obj, display in plan:
-            bpy.ops.object.select_all(action='DESELECT')
+            _deselect_all()
             try:
                 obj.select_set(True)
             except RuntimeError:
@@ -339,13 +375,21 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
             else:
                 failed.append("%s (%s)" % (display, message))
     finally:
-        bpy.ops.object.select_all(action='DESELECT')
+        # Every step guards itself: this runs on the failure path too, and a
+        # restore step that raises here would replace the real error with its own.
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+        except RuntimeError:
+            pass
         for obj in was_selected:
             try:
                 obj.select_set(True)
             except (ReferenceError, RuntimeError):
                 pass
-        context.view_layer.objects.active = was_active
+        try:
+            context.view_layer.objects.active = was_active
+        except (ReferenceError, RuntimeError):
+            pass
 
     if not written:
         if skipped and not failed:
@@ -380,13 +424,17 @@ def _first_collision(context, project, presets, export_dir_override=None):
     return None
 
 
-def _run_export(context, project, preset, export_dir_override=None):
+def _run_export(context, project, preset, export_dir_override=None, save=True):
     """Perform a preset's export, split or combined.
 
     Returns (status, message) where status is 'DONE', 'SKIPPED' (the file was
     already on disk and the preset asked to keep it) or 'FAILED'. A skip is
     deliberately not a success: counting it as one would report an export the
     user never got.
+
+    save=False leaves persisting preferences to the caller. Writing userpref.blend
+    is a whole-file write, and a multi-preset run did one per preset for state that
+    is identical either way.
     """
     fbx = preset.fbx_settings
     if fbx.use_selection and not context.selected_objects:
@@ -415,10 +463,14 @@ def _run_export(context, project, preset, export_dir_override=None):
         else:
             status, message, folder = _export(None)
     except RuntimeError as exc:
-        # Duplication or transform_apply refused — object mode only, and it
-        # baulks at library data. Reporting beats exporting something the user
+        # Duplication, baking or driving the selection refused — these operators
+        # want object mode and baulk at library data. The message is passed
+        # through rather than relabelled: everything raised in here already says
+        # which step failed, and the old blanket "could not apply transforms"
+        # also fronted for failures in the split-export loop that had nothing to
+        # do with transforms. Reporting beats exporting something the user
         # believes was transformed and was not.
-        return 'FAILED', "%s: could not apply transforms (%s)" % (preset.name, exc)
+        return 'FAILED', "%s: %s" % (preset.name, exc)
 
     if status != 'DONE':
         # Nothing was written, so nothing downstream should run: no version
@@ -434,7 +486,8 @@ def _run_export(context, project, preset, export_dir_override=None):
             pass
     # An export is the natural checkpoint: it is also the point at which the
     # version counter and the history list have just changed.
-    save_preferences()
+    if save:
+        save_preferences()
     return 'DONE', message
 
 
@@ -442,13 +495,17 @@ def _run_presets(context, project, presets, export_dir_override=None):
     """Run several presets in order. Returns (done, skipped, failed_messages)."""
     done, skipped, failed = 0, 0, []
     for preset in presets:
-        status, message = _run_export(context, project, preset, export_dir_override)
+        status, message = _run_export(
+            context, project, preset, export_dir_override, save=False)
         if status == 'DONE':
             done += 1
         elif status == 'SKIPPED':
             skipped += 1
         else:
             failed.append(message)
+    # Once for the run, not once per preset. Unconditional: a run where every
+    # preset failed can still have moved a version counter before failing.
+    save_preferences()
     return done, skipped, failed
 
 
@@ -975,17 +1032,45 @@ def _dialog_project_items(self, context):
     return _dialog_project_cache
 
 
+def _dialog_project_of(prefs, value):
+    """The project a dialog enum value points at, or None."""
+    if prefs is None or value in ("", "-1"):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= index < len(prefs.projects)):
+        return None
+    return prefs.projects[index]
+
+
 def _dialog_preset_items(self, context):
     global _dialog_preset_cache
-    prefs = config.get_prefs(context)
-    items = []
-    if prefs and self.project not in ("", "-1"):
-        index = int(self.project)
-        if 0 <= index < len(prefs.projects):
-            items = [(str(i), p.name or "Preset %d" % i, "")
-                     for i, p in enumerate(prefs.projects[index].presets)]
+    project = _dialog_project_of(config.get_prefs(context), self.project)
+    items = [(str(i), p.name or "Preset %d" % i, "")
+             for i, p in enumerate(project.presets)] if project else []
     _dialog_preset_cache = tuple(items) or (("-1", "(no presets)", ""),)
     return _dialog_preset_cache
+
+
+def _dialog_project_changed(self, context):
+    """Re-point the preset dropdown whenever the chosen project changes.
+
+    The preset enum's items are derived from `project`, but its stored value is
+    not: switching to a project with fewer presets left the old index selected,
+    pointing at a preset that no longer exists. The dialog then reported "this
+    project has no presets" about a project full of them, and refused to export
+    until the user opened the dropdown and picked one by hand.
+    """
+    project = _dialog_project_of(config.get_prefs(context), self.project)
+    if project is None or not len(project.presets):
+        return
+    wanted = min(max(project.active_preset_index, 0), len(project.presets) - 1)
+    try:
+        self.preset = str(wanted)
+    except TypeError:
+        self.preset = "0"
 
 
 class EXH_OT_export_dialog(bpy.types.Operator):
@@ -995,7 +1080,8 @@ class EXH_OT_export_dialog(bpy.types.Operator):
     bl_label = "Export Hub"
     bl_description = "Export with a saved Export Hub project and preset"
 
-    project: EnumProperty(name="Project", items=_dialog_project_items)
+    project: EnumProperty(
+        name="Project", items=_dialog_project_items, update=_dialog_project_changed)
     preset: EnumProperty(name="Preset", items=_dialog_preset_items)
     mode: EnumProperty(
         name="Run",
@@ -1016,15 +1102,15 @@ class EXH_OT_export_dialog(bpy.types.Operator):
     def _selection(self, context):
         """(prefs, project, preset) for the current dialog choices."""
         prefs = config.get_prefs(context)
-        if prefs is None or self.project in ("", "-1"):
+        project = _dialog_project_of(prefs, self.project)
+        if project is None:
             return prefs, None, None
-        index = int(self.project)
-        if not (0 <= index < len(prefs.projects)):
-            return prefs, None, None
-        project = prefs.projects[index]
-        if self.preset in ("", "-1"):
+        # Read defensively: a dynamic enum whose value is no longer among its
+        # items hands back an empty string rather than raising.
+        try:
+            pidx = int(self.preset)
+        except (TypeError, ValueError):
             return prefs, project, None
-        pidx = int(self.preset)
         if not (0 <= pidx < len(project.presets)):
             return prefs, project, None
         return prefs, project, project.presets[pidx]
@@ -1075,7 +1161,12 @@ class EXH_OT_export_dialog(bpy.types.Operator):
             return
 
         if preset is None:
-            box.label(text="This project has no presets", icon='ERROR')
+            # Two different situations, and telling a user with six presets that
+            # they have none sends them looking for a problem that is not there.
+            box.label(
+                text=("This project has no presets" if not len(project.presets)
+                      else "Pick a preset"),
+                icon='ERROR')
             return
 
         folder = self.custom_dir if self.use_custom_dir else preset.export_dir
