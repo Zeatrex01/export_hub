@@ -198,9 +198,15 @@ point it is nowhere near. Where the pivot goes is a modelling decision, not some
 should quietly change.
 
 The whole selection is duplicated in one step, so parenting and armature-modifier links between
-the objects survive into the export. Filenames still come from the original object names, not
-from Blender's `Chair.001` duplicate naming. If anything fails partway, the duplicates are
-removed anyway.
+the objects survive into the export. If anything fails partway, the duplicates are removed
+anyway.
+
+**Blender's `Chair.001` duplicate naming never reaches the engine.** Each duplicate takes over
+its original's object and mesh name for the duration of the export, and the originals are put
+back afterwards. Correcting only the filename was not enough: the name written *inside* the FBX
+is the object's own, so a `Chair.fbx` used to arrive in Unity as a `Chair.001` GameObject with a
+`Chair.001` mesh. A mesh shared by two objects keeps Blender's naming, because one name cannot
+be handed to two duplicates at once.
 
 If Blender refuses to duplicate part of the selection — linked library data is the usual reason —
 the export is refused outright rather than run on what was left. Exporting the remainder would

@@ -53,6 +53,11 @@ def _record_history(context, project_name, preset_name, filepath, kwargs):
 
 _COPY_MARKER = "_export_hub_source_index"
 
+# Blender truncates datablock names past this, and parking a name has to leave
+# room for the suffix or the two would collide on long names.
+_MAX_NAME = 63
+_NAME_PARK_SUFFIX = ".exh_orig"
+
 
 def _deselect_all():
     """Clear the selection, saying what happened when Blender refuses.
@@ -69,9 +74,67 @@ def _deselect_all():
             "edit mode and try again (%s)" % exc)
 
 
+def _park_name(datablock):
+    """Move a datablock's name aside so a copy can take it. Returns the old name."""
+    old = datablock.name
+    datablock.name = old[:_MAX_NAME - len(_NAME_PARK_SUFFIX)] + _NAME_PARK_SUFFIX
+    return old
+
+
+def _adopt_original_names(originals, mapping, restore):
+    """Hand every copy the name of the original it stands in for.
+
+    Fixing the filename downstream is not enough: the name written *inside* the
+    FBX is the object's own, so a copy called `Chair.001` arrives in the engine
+    as a `Chair.001` node with a `Chair.001` mesh, whatever the file is called.
+    Blender keeps names unique, so the original has to be parked under a
+    temporary name first and put back once the copies are gone.
+
+    Returns export_names: each original mapped to the name its file should use.
+    `restore` is appended to as names are parked — it is the caller's list rather
+    than a return value so that a failure part-way through still leaves the
+    caller holding everything renamed so far, to undo in its cleanup.
+    """
+    export_names = {}
+    for original in originals:
+        copy = mapping[original]
+        name = original.name
+        export_names[original] = name
+        try:
+            restore.append((original, _park_name(original)))
+            copy.name = name
+        except (AttributeError, TypeError, RuntimeError) as exc:
+            # Cosmetic, so it is not worth aborting an export over: the file
+            # still lands under the right name, only the node inside keeps
+            # Blender's suffix. Say so rather than leaving it a mystery.
+            print("[Export Hub] could not name the export copy of '%s' (%s)" % (name, exc))
+            continue
+
+        data = getattr(original, "data", None)
+        copy_data = getattr(copy, "data", None)
+        # copy_data is data when make_single_user declined: renaming then would
+        # rename the user's own mesh, not a throwaway.
+        if data is None or copy_data is None or copy_data is data:
+            continue
+        # Data shared with a second object cannot be handed over — two copies
+        # cannot both hold one name. A fake user is not a second object, and
+        # counting it as one would skip the rename on any mesh with the shield
+        # turned on, which is a normal thing for an artist to have done.
+        real_users = data.users - (1 if data.use_fake_user else 0)
+        if real_users > 1:
+            continue
+        try:
+            data_name = _park_name(data)
+            restore.append((data, data_name))
+            copy_data.name = data_name
+        except (AttributeError, TypeError, RuntimeError) as exc:
+            print("[Export Hub] could not name the mesh of '%s' (%s)" % (name, exc))
+    return export_names
+
+
 @contextlib.contextmanager
 def _transformed_copies(context, originals):
-    """Yield {original: copy}, where each copy has its transforms applied.
+    """Yield [(object_to_export, name_to_use_in_filenames), ...] over baked copies.
 
     Applying transforms to the real objects is destructive and the add-on cannot
     put them back — the user asked for an export, not a permanent edit of their
@@ -81,11 +144,15 @@ def _transformed_copies(context, originals):
     The set is duplicated in a single operation on purpose: duplicating object by
     object would sever parenting and armature-modifier links between them, while
     one duplicate call rewires those relationships inside the new set.
+
+    The copies take over their originals' names before the export runs, so the
+    engine sees `Chair`, not the `Chair.001` that duplicate() minted.
     """
     previous_active = context.view_layer.objects.active
     originals_set = set(originals)
     mapping = {}
     created = []
+    restore_names = []
     try:
         # Duplicates inherit custom properties, and that is the only dependable way
         # to tell which copy came from which original: duplicate() returns no
@@ -168,7 +235,9 @@ def _transformed_copies(context, originals):
         except RuntimeError as exc:
             raise RuntimeError("could not bake rotation and scale (%s)" % exc)
 
-        yield mapping
+        export_names = _adopt_original_names(originals, mapping, restore_names)
+
+        yield [(mapping[original], export_names[original]) for original in originals]
     finally:
         # Every step guards itself. This block now runs on failure paths too, and
         # one step raising must not skip the ones after it — an aborted marker
@@ -179,10 +248,45 @@ def _transformed_copies(context, originals):
                     del obj[_COPY_MARKER]
             except (ReferenceError, RuntimeError):
                 pass
+        orphan_candidates = []
         for copy in created:
+            # Read before the removal: obj.data is unreachable afterwards.
+            try:
+                data = copy.data
+            except (ReferenceError, AttributeError):
+                data = None
             try:
                 bpy.data.objects.remove(copy, do_unlink=True)
             except (ReferenceError, RuntimeError):
+                continue  # still in use, so its data is not an orphan either
+            if data is not None:
+                orphan_candidates.append(data)
+
+        # Removing an object leaves its mesh behind at zero users — still
+        # holding the name it took from the original, so the restore below would
+        # collide and hand the original the very `.001` this exists to avoid.
+        # It is dead weight in the .blend regardless: an export should not leave
+        # a mesh behind every time it runs. The user count is what makes this
+        # safe — data still owned by the original never reaches zero.
+        orphans = []
+        for data in orphan_candidates:
+            try:
+                if data.users == 0:
+                    orphans.append(data)
+            except ReferenceError:
+                pass
+        if orphans:
+            try:
+                bpy.data.batch_remove(orphans)
+            except (RuntimeError, TypeError) as exc:
+                print("[Export Hub] could not clear %d baked copy datablock(s) (%s)"
+                      % (len(orphans), exc))
+
+        # Only now, with the copies and their data gone, is the name free.
+        for datablock, name in reversed(restore_names):
+            try:
+                datablock.name = name
+            except (ReferenceError, RuntimeError, AttributeError):
                 pass
         try:
             bpy.ops.object.select_all(action='DESELECT')
@@ -197,18 +301,6 @@ def _transformed_copies(context, originals):
             context.view_layer.objects.active = previous_active
         except (ReferenceError, RuntimeError):
             pass
-
-
-def _export_plan(context, mapping):
-    """[(object_to_export, name_to_use_in_filenames), ...].
-
-    With copies in play the object written to the FBX is a throwaway duplicate,
-    but the filename must still come from the original — nobody wants
-    `Chair.001.fbx`.
-    """
-    if mapping is None:
-        return [(obj, obj.name) for obj in context.selected_objects]
-    return [(copy, original.name) for original, copy in mapping.items()]
 
 
 def _resolve_target(context, project, preset, object_name=None, export_dir_override=None):
@@ -448,8 +540,13 @@ def _run_export(context, project, preset, export_dir_override=None, save=True):
                  and fbx.use_selection
                  and bool(context.selected_objects))
 
-    def _export(mapping):
-        plan = _export_plan(context, mapping)
+    def _export(plan):
+        # plan is [(object_to_export, name_to_use_in_filenames), ...]. It is None
+        # when the real objects are exported; with copies in play the object
+        # written to the FBX is a throwaway duplicate, and _transformed_copies
+        # has already paired each one with the name its file should use.
+        if plan is None:
+            plan = [(obj, obj.name) for obj in context.selected_objects]
         # Splitting only means anything when the export set is the selection.
         if preset.split_per_object and fbx.use_selection:
             return _export_per_object(
@@ -458,8 +555,8 @@ def _run_export(context, project, preset, export_dir_override=None, save=True):
 
     try:
         if on_copies:
-            with _transformed_copies(context, list(context.selected_objects)) as mapping:
-                status, message, folder = _export(mapping)
+            with _transformed_copies(context, list(context.selected_objects)) as plan:
+                status, message, folder = _export(plan)
         else:
             status, message, folder = _export(None)
     except RuntimeError as exc:
