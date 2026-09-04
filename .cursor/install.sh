@@ -56,7 +56,14 @@ fi
 
 ln -sfn "${BLENDER_HOME}/blender" "${BIN_DIR}/blender"
 
-echo "==> Blender version:"
-"${BIN_DIR}/blender" --background --version | head -n 1
+# Also link into a directory that is on PATH for every shell (login or not) so a
+# bare `blender` works. /usr/local/bin is on the default PATH; fall back quietly
+# to ~/.local/bin only when it cannot be written.
+if command -v sudo >/dev/null 2>&1 && [ -d /usr/local/bin ]; then
+    sudo ln -sfn "${BLENDER_HOME}/blender" /usr/local/bin/blender
+fi
 
-echo "==> Install complete. 'blender' is available at ${BIN_DIR}/blender"
+echo "==> Blender version:"
+"${BLENDER_HOME}/blender" --background --version | head -n 1
+
+echo "==> Install complete. 'blender' resolves to ${BLENDER_HOME}/blender"
