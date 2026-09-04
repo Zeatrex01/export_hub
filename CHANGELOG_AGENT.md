@@ -14,9 +14,14 @@ Blender add-on and an end-to-end test harness that drives the add-on headlessly.
   install script below after checkout. No `start`/`terminals` are needed because
   Blender is a command-line tool here, not a long-running service.
 - `.cursor/install.sh` — idempotent install step. Installs the system libraries
-  a headless Blender needs, downloads a pinned Blender 4.2 LTS portable build,
-  and links `blender` into both `~/.local/bin` and `/usr/local/bin` so a bare
-  `blender` works in any shell. Re-running reuses an existing Blender.
+  a headless Blender needs, downloads a pinned Blender build (default 4.5.1 LTS,
+  the top of the supported range; overridable with `BLENDER_VERSION`), and links
+  `blender` into both `~/.local/bin` and `/usr/local/bin` so a bare `blender`
+  works in any shell. Re-running reuses an existing Blender.
+- `tests/run_matrix.sh` — runs the suite against several Blender versions,
+  downloading any that are missing. Default matrix: 4.2.23 and 4.5.1. Verified
+  the add-on (which targets Blender 3.6 minimum, up to the 4.5 LTS line) passes
+  on both.
 - `tests/test_export_hub.py` — headless end-to-end test suite. Installs the
   repository as the `export_hub` add-on, enables Blender's bundled FBX exporter,
   builds a small scene and exercises the real user flows: engine-template

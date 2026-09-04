@@ -10,8 +10,12 @@
 
 set -euo pipefail
 
-BLENDER_VERSION="4.2.23"
-BLENDER_SERIES="4.2"
+# The add-on targets Blender 3.6 as a minimum and is compatible up to the 4.5
+# LTS line. Pin to the top of that supported range so the environment exercises
+# what current users run; override with BLENDER_VERSION to test another build
+# (for example the 3.6 lower bound). BLENDER_SERIES is derived as major.minor.
+BLENDER_VERSION="${BLENDER_VERSION:-4.5.1}"
+BLENDER_SERIES="${BLENDER_SERIES:-$(printf '%s' "${BLENDER_VERSION}" | cut -d. -f1,2)}"
 BLENDER_PKG="blender-${BLENDER_VERSION}-linux-x64"
 BLENDER_TARBALL="${BLENDER_PKG}.tar.xz"
 BLENDER_URL="https://download.blender.org/release/Blender${BLENDER_SERIES}/${BLENDER_TARBALL}"
