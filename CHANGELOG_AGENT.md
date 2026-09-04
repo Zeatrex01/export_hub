@@ -3,6 +3,32 @@
 This document records changes made by the AI agent. The most recent change set
 is kept at the top.
 
+## Sidebar panel redesign (UI)
+
+Reworked the 3D-viewport sidebar panel (`ui.py`, `EXH_PT_export`) into a
+clearer, more modern card-based layout. No operator logic or behaviour changed —
+only presentation.
+
+### Changed
+
+- The panel is now a set of titled, numbered cards that read as an ordered flow:
+  `1. Project`, `2. Preset`, `3. Destination`, `4. Check & Export`. A small
+  `_card()` helper draws each section header consistently (icon + title).
+- `3. Destination` shows the folder, the editable filename with its token
+  picker, and a resolved `Output` preview on labelled rows. When no folder is
+  set it turns red and offers a direct "Set export folder" button.
+- `4. Check & Export` groups Validate, the validation results, and the export
+  actions together, with the primary `Export` button given strong emphasis and
+  `Export All Presets` as a clearly secondary action.
+- The first-run state is now a friendly "Welcome to Export Hub" card with a
+  prominent "Start from an Engine" action instead of a bare label.
+
+### Verified
+
+- Registers cleanly and the headless E2E suite still passes 9/9.
+- Rendered in the Blender 4.5.1 GUI with no draw/Python errors; Validate and
+  Export both work from the new layout (see the demo recording in the PR).
+
 ## Cloud Agent development environment setup
 
 Added a reproducible Cloud Agent development environment for the Export Hub
