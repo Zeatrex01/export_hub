@@ -19,9 +19,9 @@ Blender add-on and an end-to-end test harness that drives the add-on headlessly.
   `blender` into both `~/.local/bin` and `/usr/local/bin` so a bare `blender`
   works in any shell. Re-running reuses an existing Blender.
 - `tests/run_matrix.sh` — runs the suite against several Blender versions,
-  downloading any that are missing. Default matrix: 4.2.23 and 4.5.1. Verified
-  the add-on (which targets Blender 3.6 minimum, up to the 4.5 LTS line) passes
-  on both.
+  downloading any that are missing. Default matrix: 3.6.23 (minimum), 4.2.23 and
+  4.5.1 (ceiling). Verified the add-on passes on all three, covering the full
+  supported range (Blender 3.6 up to the 4.5 LTS line).
 - `tests/test_export_hub.py` — headless end-to-end test suite. Installs the
   repository as the `export_hub` add-on, enables Blender's bundled FBX exporter,
   builds a small scene and exercises the real user flows: engine-template
