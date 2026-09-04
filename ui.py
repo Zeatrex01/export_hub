@@ -184,6 +184,20 @@ def _filename_row(layout, preset):
     row.menu("EXH_MT_tokens", text="", icon='DOWNARROW_HLT')
 
 
+def _card(layout, title, icon, step=None):
+    """A titled section box with an icon header, for a consistent card layout.
+
+    Returns the box so the caller fills in the body. `step` prefixes the title
+    with a number so the panel reads as an ordered flow rather than a stack of
+    unrelated controls.
+    """
+    box = layout.box()
+    header = box.row(align=True)
+    label = title if step is None else "%d.  %s" % (step, title)
+    header.label(text=label, icon=icon)
+    return box
+
+
 class EXH_UL_named(bpy.types.UIList):
     """Generic list drawing an item's editable .name. Used for projects & presets."""
 
@@ -359,6 +373,7 @@ class EXH_PT_export(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_split = False
         prefs = config.get_prefs(context)
         if prefs is None:
             layout.label(text="Add-on not available.", icon='ERROR')
@@ -366,13 +381,23 @@ class EXH_PT_export(bpy.types.Panel):
 
         _draw_update_banner(layout)
 
+        # --- First run: an inviting welcome instead of a bare "no projects". ---
         if not len(prefs.projects):
-            layout.label(text="No projects configured.", icon='INFO')
-            layout.menu("EXH_MT_new_project", text="Start from an Engine", icon='PRESET')
-            layout.operator("preferences.addon_show", text="Set up projects").module = __package__
+            box = layout.box()
+            title = box.row(align=True)
+            title.label(text="Welcome to Export Hub", icon='EXPORT')
+            box.label(text="Set a destination once, then export in one click.")
+            box.separator()
+            big = box.column(align=True)
+            big.scale_y = 1.5
+            big.menu("EXH_MT_new_project", text="Start from an Engine", icon='PRESET')
+            box.operator("preferences.addon_show",
+                         text="Open Setup", icon='PREFERENCES').module = __package__
             return
 
-        layout.prop(prefs, "active_project_enum", text="")
+        # --- 1. Project ------------------------------------------------------
+        box = _card(layout, "Project", 'OUTLINER_COLLECTION', step=1)
+        box.prop(prefs, "active_project_enum", text="")
 
         idx = prefs.active_project_index
         if not (0 <= idx < len(prefs.projects)):
@@ -380,38 +405,68 @@ class EXH_PT_export(bpy.types.Panel):
         project = prefs.projects[idx]
 
         if not len(project.presets):
-            layout.label(text="No presets in this project.", icon='INFO')
-            layout.operator("preferences.addon_show", text="Add presets").module = __package__
+            box = layout.box()
+            box.label(text="This project has no presets yet.", icon='INFO')
+            box.operator("preferences.addon_show",
+                         text="Add Presets", icon='PREFERENCES').module = __package__
             return
 
-        # Preset picker for this project.
-        layout.template_list("EXH_UL_named", "panel_presets", project, "presets",
-                             project, "active_preset_index", rows=3)
+        # --- 2. Preset -------------------------------------------------------
+        box = _card(layout, "Preset", 'PRESET', step=2)
+        box.template_list("EXH_UL_named", "panel_presets", project, "presets",
+                          project, "active_preset_index", rows=3)
 
         pidx = project.active_preset_index
         preset_name = ""
+        has_folder = False
         if 0 <= pidx < len(project.presets):
             preset = project.presets[pidx]
             preset_name = preset.name
-            col = layout.column(align=True)
-            col.label(text=preset.export_dir or "(no folder set)", icon='FILE_FOLDER')
-            # Editable output name + token picker.
-            _filename_row(col, preset)
-            preview = config.resolve_filename(preset.filename_template, context, project, preset) + ".fbx"
-            col.label(text="→ " + preview, icon='FILE_TICK')
+            has_folder = bool(preset.export_dir)
 
-        layout.separator()
-        layout.operator("export_hub.validate", text="Validate", icon='CHECKMARK')
-        _draw_validation(layout, prefs, project.name, preset_name)
+            # --- 3. Destination ---------------------------------------------
+            dest = _card(layout, "Destination", 'FILE_FOLDER', step=3)
+            folder = dest.row(align=True)
+            if has_folder:
+                folder.label(text=preset.export_dir, icon='FILE_FOLDER')
+            else:
+                folder.alert = True
+                folder.label(text="No folder set", icon='ERROR')
+                dest.operator("preferences.addon_show",
+                              text="Set export folder", icon='PREFERENCES').module = __package__
 
-        row = layout.row()
-        row.scale_y = 1.7
-        row.operator("export_hub.export", text="Export", icon='EXPORT')
-        layout.operator("export_hub.export_all", text="Export All Presets", icon='PACKAGE')
+            name_row = dest.split(factor=0.28, align=True)
+            name_row.label(text="Name")
+            _filename_row(name_row, preset)
 
-        row = layout.row(align=True)
-        row.operator("export_hub.open_export_folder", text="Open Folder", icon='FOLDER_REDIRECT')
-        row.operator("preferences.addon_show", text="Settings", icon='PREFERENCES').module = __package__
+            preview = config.resolve_filename(
+                preset.filename_template, context, project, preset) + ".fbx"
+            out = dest.split(factor=0.28, align=True)
+            out.label(text="Output")
+            out.label(text=preview, icon='FILE_TICK')
+
+        # --- 4. Validate (optional pre-flight) -------------------------------
+        step = _card(layout, "Check & Export", 'CHECKMARK', step=4)
+        step.operator("export_hub.validate", text="Validate Selection", icon='ZOOM_ALL')
+        _draw_validation(step, prefs, project.name, preset_name)
+
+        # The primary action, given its own emphasis. Blender greys it out on its
+        # own when the preset has no folder (the operator's poll), and the
+        # Destination card above already says why.
+        run = step.column(align=True)
+        big = run.row(align=True)
+        big.scale_y = 1.9
+        big.operator("export_hub.export", text="Export", icon='EXPORT')
+        second = run.row(align=True)
+        second.scale_y = 1.15
+        second.operator("export_hub.export_all", text="Export All Presets", icon='PACKAGE')
+
+        # --- Footer ----------------------------------------------------------
+        footer = layout.row(align=True)
+        footer.operator("export_hub.open_export_folder",
+                        text="Open Folder", icon='FOLDER_REDIRECT')
+        footer.operator("preferences.addon_show",
+                        text="Settings", icon='PREFERENCES').module = __package__
 
 
 class EXH_PT_quick(bpy.types.Panel):
