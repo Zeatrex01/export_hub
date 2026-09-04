@@ -15,7 +15,8 @@ Blender add-on and an end-to-end test harness that drives the add-on headlessly.
   Blender is a command-line tool here, not a long-running service.
 - `.cursor/install.sh` — idempotent install step. Installs the system libraries
   a headless Blender needs, downloads a pinned Blender 4.2 LTS portable build,
-  and links `blender` onto `~/.local/bin`. Re-running reuses an existing Blender.
+  and links `blender` into both `~/.local/bin` and `/usr/local/bin` so a bare
+  `blender` works in any shell. Re-running reuses an existing Blender.
 - `tests/test_export_hub.py` — headless end-to-end test suite. Installs the
   repository as the `export_hub` add-on, enables Blender's bundled FBX exporter,
   builds a small scene and exercises the real user flows: engine-template
