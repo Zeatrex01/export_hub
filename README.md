@@ -265,7 +265,10 @@ sidebar when there is one. The request runs on a background thread, so Blender n
 waiting for the network.
 
 Turn it off with **Check for updates** in Preferences — with it unchecked the add-on makes no
-network requests at all. **Check Now** runs one on demand.
+network requests at all. **Check Now** runs one on demand. In Blender 4.2 and newer the add-on
+also follows Blender's own **Preferences > System > Network > Allow Online Access**: while that
+is off (or Blender runs with `--offline-mode`) no check runs, not even from Check Now. A check
+that fails (offline, timeout) is tried again the next time Blender starts.
 
 Note that it compares against published **Releases**, not commits or tags.
 

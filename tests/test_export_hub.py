@@ -398,6 +398,53 @@ def test_history_reexport_repeats_the_recorded_export():
     _assert(result != {"FINISHED"}, "re-export of an object that is gone should be refused")
 
 
+def test_update_check_honours_online_access():
+    import export_hub
+    from export_hub import updates
+    prefs = _prefs()
+    prefs.check_updates = True
+    prefs.last_update_check = ""
+    updates.reset()
+    real = updates.network_allowed
+    updates.network_allowed = lambda: False   # Preferences > System > Allow Online Access off
+    try:
+        result = _call(bpy.ops.export_hub.check_updates)
+        _assert(result != {"FINISHED"}, "Check Now must not go online with online access off")
+        export_hub._startup_update_check()
+        _assert(updates.state()["status"] == "idle", "a check started: %s" % updates.state())
+        _assert(prefs.last_update_check == "", "no check ran, so none is recorded")
+    finally:
+        updates.network_allowed = real
+    _assert(updates.network_allowed() == bool(getattr(bpy.app, "online_access", True)),
+            "network_allowed must follow bpy.app.online_access")
+
+
+def test_failed_update_check_is_retried():
+    import datetime
+    from export_hub import updates
+    prefs = _prefs()
+    prefs.last_update_check = ""
+    updates._state.update(status="error", latest=None, message="offline")
+    updates._redraw_when_done()
+    _assert(prefs.last_update_check == "", "a failed check must not count as today's check")
+    updates._state.update(status="current", latest=(1, 8, 0), message="")
+    updates._redraw_when_done()
+    _assert(prefs.last_update_check == datetime.date.today().isoformat(),
+            "a completed check is recorded: %r" % prefs.last_update_check)
+    updates.reset()
+
+
+def test_startup_update_timer_survives_loading_a_file():
+    import addon_utils
+    import export_hub
+    addon_utils.disable(ADDON_MODULE)
+    addon_utils.enable(ADDON_MODULE, default_set=True)
+    import export_hub
+    bpy.ops.wm.read_homefile(use_empty=True)
+    _assert(bpy.app.timers.is_registered(export_hub._startup_update_check),
+            "Blender drops non-persistent timers when the startup file loads")
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",

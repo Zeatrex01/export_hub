@@ -101,6 +101,10 @@ def _draw_update_row(layout, prefs):
     row.prop(prefs, "check_updates")
     row.operator("export_hub.check_updates", text="Check Now", icon='FILE_REFRESH')
 
+    if not updates.network_allowed():
+        box.label(text=updates.OFFLINE_MESSAGE, icon='INFO')
+        return
+
     info = updates.state()
     status = info["status"]
     installed = updates.format_version(updates.current_version())

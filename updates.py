@@ -9,7 +9,9 @@ Three constraints shape this file:
   plain strings and tuples into `_state`; asking Blender to redraw is done by a
   timer running on the main thread.
 * An add-on reaching the network without the user knowing is rude. The check is
-  off-switchable, runs at most once a day, and reports what it did.
+  off-switchable, runs at most once a day, reports what it did, and never runs
+  while Blender's own Preferences > System > Network > Allow Online Access is
+  off (Blender 4.2+), not even from Check Now.
 """
 
 import re
@@ -70,9 +72,38 @@ def state():
         return dict(_state)
 
 
+def network_allowed():
+    """Blender's Allow Online Access switch (4.2+, also set by --offline-mode).
+
+    Older Blender has no such switch; the add-on's own Check for updates option
+    is the only control there.
+    """
+    return bool(getattr(bpy.app, "online_access", True))
+
+
+OFFLINE_MESSAGE = ("Online access is off in Preferences > System > Network, "
+                   "so Export Hub does not check for updates")
+
+
 def due_today(prefs):
-    """True when no successful check has been started yet today."""
+    """True when no check has completed yet today."""
     return prefs.last_update_check != datetime.date.today().isoformat()
+
+
+def _record_completed_check():
+    """Main thread: remember today's check once it got an answer.
+
+    Only an answer counts. A check that failed (offline, timeout, GitHub error) is
+    not recorded, so the next start of Blender tries again instead of waiting a day.
+    """
+    with _lock:
+        answered = _state["status"] in ("current", "available", "none")
+    if not answered:
+        return
+    from . import config
+    prefs = config.get_prefs(bpy.context)
+    if prefs is not None:
+        prefs.last_update_check = datetime.date.today().isoformat()
 
 
 def _worker():
@@ -115,6 +146,7 @@ def _redraw_when_done():
     if still_running:
         return 0.5
 
+    _record_completed_check()
     window_manager = bpy.context.window_manager
     if window_manager:
         for window in window_manager.windows:
@@ -125,7 +157,9 @@ def _redraw_when_done():
 
 
 def start_check():
-    """Kick off a check unless one is already running."""
+    """Kick off a check unless one is already running or online access is off."""
+    if not network_allowed():
+        return False
     with _lock:
         if _state["status"] == "checking":
             return False
@@ -135,7 +169,7 @@ def start_check():
 
     threading.Thread(target=_worker, daemon=True).start()
     if not bpy.app.timers.is_registered(_redraw_when_done):
-        bpy.app.timers.register(_redraw_when_done, first_interval=0.5)
+        bpy.app.timers.register(_redraw_when_done, first_interval=0.5, persistent=True)
     return True
 
 

@@ -953,10 +953,9 @@ class EXH_OT_check_updates(bpy.types.Operator):
     bl_description = "Ask GitHub whether a newer release of this add-on is available"
 
     def execute(self, context):
-        prefs = config.get_prefs(context)
-        if prefs is not None:
-            prefs.last_update_check = datetime.date.today().isoformat()
-            save_preferences()
+        if not updates.network_allowed():
+            self.report({'WARNING'}, updates.OFFLINE_MESSAGE)
+            return {'CANCELLED'}
         if not updates.start_check():
             self.report({'INFO'}, "Already checking")
             return {'CANCELLED'}

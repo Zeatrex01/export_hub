@@ -27,8 +27,6 @@ bl_info = {
     "category": "Import-Export",
 }
 
-import datetime
-
 import bpy
 
 from . import properties, operators, ui, updates, validate
@@ -46,8 +44,10 @@ def _startup_update_check():
     from . import config
 
     prefs = config.get_prefs(bpy.context)
-    if prefs is not None and prefs.check_updates and updates.due_today(prefs):
-        prefs.last_update_check = datetime.date.today().isoformat()
+    if (prefs is not None and prefs.check_updates and updates.network_allowed()
+            and updates.due_today(prefs)):
+        # The day is recorded when the check gets an answer, not here: a failed
+        # check is retried on the next start.
         updates.start_check()
     return None
 
@@ -60,7 +60,9 @@ def register():
     # Module state outlives a disable, so a check left mid-flight last time would
     # otherwise still read as "in progress" and block every new one.
     updates.reset()
-    bpy.app.timers.register(_startup_update_check, first_interval=5.0)
+    # Persistent: when the add-on is enabled at startup, Blender loads the startup
+    # file afterwards and would drop an ordinary timer before it ever ran.
+    bpy.app.timers.register(_startup_update_check, first_interval=5.0, persistent=True)
 
 
 def unregister():
