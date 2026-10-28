@@ -6,11 +6,17 @@ else -- the operator, the menu and the enum items all derive from this table.
 
 Why variants instead of one template per engine
 -----------------------------------------------
-`bake_space_transform` ("Apply Transform") is the single setting that decides
-whether a model lands upright in the engine. It is reliable for static meshes
-but is known to break armatures and parenting relationships, so a skeletal or
-animation export must leave it off. One template per engine cannot express
-that, so every engine ships three variants instead.
+`bake_space_transform` ("Apply Transform") decides where Blender's Z-up to Y-up
+change goes. Off, the exporter writes it as a -90 deg X rotation on every root
+object: the model looks right in Unity, but the rotation travels with it, and a
+script that resets it (Instantiate with Quaternion.identity) lays the model
+down. On, it is baked into the mesh data and the roots stay at 0. Blender's own
+exporter marks it experimental and "known to be broken with armatures/
+animations", so a skeletal or animation export leaves it off (on a one-bone
+test rig it left the mesh and rig nodes disagreeing, without visible breakage
+in Unity 2022.3 / 6). One template per engine cannot express that, so every
+engine ships three variants instead. Measured with ArtHub's export check kit
+(ArtHub docs/EXPORT_GUIDE_TR.md).
 
 Values marked VERIFY in `notes` are the ones that legitimately differ between
 pipelines (unit scale in particular); they are sensible defaults, not laws.
@@ -41,7 +47,8 @@ _BASE = {
     "axis_up": "Y",
     "use_space_transform": True,
     "bake_space_transform": False,
-    # Engines want smoothing groups; "Normals Only" triggers import warnings.
+    # Unreal warns about missing smoothing groups with "Normals Only"; Unity and
+    # Godot read the normals either way, and Face writes the normals too.
     "mesh_smooth_type": "FACE",
     "use_mesh_modifiers": True,
     "use_subsurf": False,
@@ -74,7 +81,9 @@ _ANIM_SETTINGS = {
     "bake_anim_use_nla_strips": False,
     "bake_anim_force_startend_keying": True,
     "bake_anim_step": 1.0,
-    "bake_anim_simplify_factor": 1.0,
+    # 0 keeps every baked key: Blender's default 1.0 thins keys and can drift
+    # on fast motion.
+    "bake_anim_simplify_factor": 0.0,
     "use_mesh_modifiers": False,
 }
 
@@ -87,6 +96,11 @@ def _merge(*layers):
     return out
 
 
+_GODOT_GLTF = ("Godot recommends glTF (.glb); this template writes FBX, which "
+               "Godot 4.3+ imports with ufbx. For glTF use Blender's glTF "
+               "exporter: +Y Up, Apply Modifiers, Animation mode Actions.")
+
+
 TEMPLATES = (
     # ----------------------------------------------------------------- Unity
     Template(
@@ -96,9 +110,9 @@ TEMPLATES = (
         summary="Props and environment meshes, no armature",
         settings=_merge({
             "object_types": _STATIC_TYPES,
-            # Unity applies a -89.98 deg X rotation to plain Y-up FBX. Baking
-            # the space transform cancels it, and is safe here precisely
-            # because there is no armature to break.
+            # Without it the root carries Blender's axis change as -90 deg X
+            # (-89.98 from Blender 4.x). Baking the space transform puts it in
+            # the mesh data, and is safe here because there is no armature.
             "bake_space_transform": True,
             "apply_scale_options": "FBX_SCALE_UNITS",
             "use_tspace": True,
@@ -117,9 +131,12 @@ TEMPLATES = (
             "apply_scale_options": "FBX_SCALE_UNITS",
             "use_tspace": True,
         }),
-        notes="Apply Transform stays off for rigs. If the character lands "
-              "rotated in Unity, enable Bake Axis Conversion on the model "
-              "import settings rather than turning it on here.",
+        notes="Apply Transform stays off for rigs, so the mesh and rig nodes "
+              "carry -90 on X in Unity: that is normal and the character still "
+              "faces +Z. Do NOT enable Bake Axis Conversion for this export: it "
+              "turns the character around (measured in Unity 2022.3 and 6). For "
+              "zero rotations export Forward -Y, Up Z, Use Space Transform off, "
+              "and only then enable Bake Axis Conversion.",
     ),
     Template(
         id="unity_animation",
@@ -184,7 +201,7 @@ TEMPLATES = (
             "apply_scale_options": "FBX_SCALE_UNITS",
             "use_tspace": True,
         }),
-        notes="",
+        notes=_GODOT_GLTF,
     ),
     Template(
         id="godot_skeletal",
@@ -197,7 +214,7 @@ TEMPLATES = (
             "use_tspace": True,
         }),
         notes="Only deform bones are exported; Godot shades blend shapes "
-              "incorrectly when non-deforming bones come along.",
+              "incorrectly when non-deforming bones come along. " + _GODOT_GLTF,
     ),
     Template(
         id="godot_animation",
@@ -207,7 +224,7 @@ TEMPLATES = (
         settings=_merge(_ANIM_SETTINGS, {
             "apply_scale_options": "FBX_SCALE_UNITS",
         }),
-        notes="",
+        notes=_GODOT_GLTF,
     ),
 )
 

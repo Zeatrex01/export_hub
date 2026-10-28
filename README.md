@@ -104,11 +104,16 @@ cannot serve both a static prop and a rigged character:
 | Apply Transform | on | **off** | **off** |
 | Baked animation | off | off | on, all actions |
 
-**Why Apply Transform differs.** Blender is Z-up, the engines are Y-up. Baking the space
-transform cancels the rotation offset for static meshes, but it breaks armatures and parenting
-relationships — so any variant carrying a rig leaves it off. If a character lands rotated in
-Unity, fix it with *Bake Axis Conversion* on the model's import settings, not by turning this
-on. Applying a template surfaces its caveats as a warning in Blender's status bar.
+**Why Apply Transform differs.** Blender is Z-up, the engines are Y-up. Without Apply Transform
+the exporter writes that change as a -90° X rotation on each root object: the model still looks
+right in Unity, but the rotation travels with it (and a script that resets it lays the model
+down). Baking the space transform puts the change into the mesh data for static meshes. Blender
+marks it experimental and known to break armatures and animations, so any variant carrying a rig
+leaves it off: the character's mesh and rig nodes then show -90 on X in Unity, which is normal,
+and it still faces +Z. **Do not turn on *Bake Axis Conversion* for these exports**: on a -Z / Y
+export it turns the character around (measured in Unity 2022.3 and Unity 6). For zero
+rotations, export Forward -Y, Up Z with Use Space Transform off, and only then enable it.
+Applying a template surfaces its caveats as a warning in Blender's status bar.
 
 Templates are starting points, not locks: applying one writes the values onto your preset and
 leaves. Every setting stays editable afterwards, and the export folder and filename template
