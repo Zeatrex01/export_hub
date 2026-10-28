@@ -249,9 +249,8 @@ the faces pointing outward when it applies one — but a mirror inherited from a
 because only the object's own transform is applied, so that stays an error.
 
 An **animated armature with a scale** other than 1 — its own or a parent's — is refused when
-baking: applying scale
-rescales the rest pose but not the bone keys, so the animation would drift away from its mesh.
-Apply scale before animating, or leave baking off for that preset. The temporary copies use the
+baking: applying scale rescales the rest pose but not the bone keys, so the animation would
+drift away from its mesh. Apply scale before animating, or leave baking off for that preset. The temporary copies use the
 originals' actions and materials, so the file carries `Run` and `Wood`, never `Run.001` or
 `Wood.001`, and nothing is left behind in your .blend.
 
