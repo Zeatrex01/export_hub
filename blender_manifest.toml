@@ -1,0 +1,21 @@
+# Blender 4.2+ extension manifest. package.py builds the extension zip from it and checks
+# that its version matches bl_info in __init__.py, which older Blender (3.6 to 4.1) reads.
+schema_version = "1.0.0"
+
+id = "export_hub"
+version = "1.8.0"
+name = "Export Hub"
+tagline = "Per-project FBX export presets for Unity, Unreal and Godot"
+maintainer = "Malik3D"
+type = "add-on"
+
+website = "https://github.com/Zeatrex01/export_hub"
+tags = ["Import-Export"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Check GitHub once a day for a newer release (can be turned off)"
+files = "Write FBX files to your export folders and JSON config files"

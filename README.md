@@ -44,10 +44,20 @@ Project "Unity"                 Project "Unreal"
 
 ## Installation
 
-1. Download `export_hub-<version>.zip` from the releases, or build it yourself with
-   `package.bat`.
-2. In Blender: **Edit → Preferences → Add-ons → Install...**, pick the zip, enable it.
-3. The panel appears in the 3D viewport sidebar (press <kbd>N</kbd>) under the **Export** tab.
+Download from the [releases](https://github.com/Zeatrex01/export_hub/releases), or build the
+zips yourself with `python package.py` (see [Building the zip](#building-the-zip)).
+
+**Blender 3.6 and newer, or upgrading from 1.7 or earlier:** `export_hub-<version>.zip`.
+In Blender 4.2 and newer: **Edit → Preferences → Add-ons → ⌄ (top right) → Install from
+Disk...**; in 3.6 to 4.1: **Edit → Preferences → Add-ons → Install...**. Pick the zip and
+enable **Export Hub**. Installing over an older version keeps your projects, presets and history.
+
+**Blender 4.2 and newer, as an extension:** `export_hub-<version>-extension.zip`, installed
+the same way (or dragged into Blender). Blender treats an extension as a different add-on from
+the classic install, so when switching, first save your setup with **Export Config to JSON**,
+remove the old add-on, install the extension and import the JSON.
+
+The panel appears in the 3D viewport sidebar (press <kbd>N</kbd>) under the **Export** tab.
 
 ## Quick start
 
@@ -297,20 +307,41 @@ Note that it compares against published **Releases**, not commits or tags.
 
 ## Compatibility
 
-- **Blender 3.6 and newer**, including 4.x. The version in `bl_info` is a minimum, not a
-  ceiling. FBX options are filtered against the running Blender's actual exporter signature,
-  so a version that adds or retires an option does not break the export — anything skipped is
-  named on the system console.
+- **Blender 3.6 and newer**, including 4.x and 5.x. The version in `bl_info` is a minimum, not a
+  ceiling. FBX options and their values are filtered against the running Blender's actual
+  exporter, so a version that adds or retires an option does not break the export — anything
+  skipped is named on the system console.
+- Blender 4.4+ layered actions and action slots are understood by the animation checks.
 - Requires Blender's bundled **FBX format** add-on to be enabled (it is, by default).
-- Windows, macOS and Linux. `package.bat` is Windows-only; on other platforms zip the
-  `export_hub` folder yourself, keeping the folder at the archive root.
+- Windows, macOS and Linux.
+
+## Testing
+
+`tests/test_export_hub.py` drives the add-on the way a user does — creating projects from
+templates, validating, exporting real FBX files and reading them back — and exits non-zero on
+any failure:
+
+```
+blender --background --factory-startup --python tests/test_export_hub.py
+```
+
+It also runs with the `bpy` module from PyPI (`pip install bpy`, then
+`python tests/test_export_hub.py`). Set `EXH_TESTS=name,other` to run only the tests whose
+names contain those words. The suite writes to Blender's user folders, so run it with a
+throwaway `HOME` (or `BLENDER_USER_RESOURCES`) rather than your everyday profile.
 
 ## Building the zip
 
-Run `package.bat`. It reads the version from `bl_info`, stages only the add-on's own modules —
-a whitelist, so local notes and tooling can never leak into a release — and writes
-`build/export_hub-<version>.zip` with the package folder at the archive root, which is the
-layout Blender's installer expects. It prints the archive contents so you can see exactly what
+Run `python package.py` (or `package.bat` on Windows, which calls it). It reads the version
+from `bl_info`, checks that `blender_manifest.toml` says the same, and writes two archives to
+`build/`:
+
+- `export_hub-<version>.zip` — the classic add-on, with the package folder at the archive root;
+- `export_hub-<version>-extension.zip` — the Blender 4.2+ extension package.
+
+Only the add-on's own modules are packed — a whitelist, so local notes and tooling can never
+leak into a release — every entry is written with forward slashes (archives written with
+backslashes install on Windows only), and the contents are printed so you can see exactly what
 shipped.
 
 ## Author

@@ -42,14 +42,24 @@ _lock = threading.Lock()
 
 
 def current_version():
-    """This add-on's version, read from bl_info at call time.
+    """This add-on's version, read at call time.
 
     Looked up through sys.modules rather than imported, because this module is
     imported *by* the package __init__ that defines bl_info — importing it back
-    at module level would be circular.
+    at module level would be circular. addon_utils.module_bl_info is asked
+    first: installed as a Blender 4.2+ extension the package has no bl_info
+    (Blender removes it), and the version comes from blender_manifest.toml.
     """
     package = sys.modules.get(__package__)
-    version = getattr(package, "bl_info", {}).get("version", (0, 0, 0))
+    version = None
+    if package is not None:
+        try:
+            import addon_utils
+            version = addon_utils.module_bl_info(package).get("version")
+        except Exception:  # an introspection helper, never worth failing over
+            version = None
+    if not version or tuple(version) == (0, 0, 0):
+        version = getattr(package, "bl_info", {}).get("version", (0, 0, 0))
     return _pad(tuple(version))
 
 

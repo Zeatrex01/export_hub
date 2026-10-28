@@ -643,6 +643,8 @@ def test_package_zip_uses_forward_slashes():
             "entries must sit in export_hub/ with forward slashes: %s" % entries)
     shipped = {e.split("/", 1)[1] for e in entries}
     _assert(set(package.FILES) <= shipped, "required files missing: %s" % (set(package.FILES) - shipped))
+    _assert("blender_manifest.toml" not in shipped,
+            "a manifest makes 4.2+ install the classic zip as an extension, under another module name")
     _assert(shipped <= set(package.FILES + package.OPTIONAL),
             "files outside the whitelist shipped: %s" % (shipped - set(package.FILES + package.OPTIONAL)))
 
@@ -816,6 +818,48 @@ def test_validator_root_bones_follow_deform_only():
     preset.fbx_settings.use_armature_deform_only = False
     warnings = _messages(validate.run(bpy.context, project, preset), 'WARNING')
     _assert(any("3 root bones" in m for m in warnings), warnings)
+
+
+def test_zz_extension_package_installs_and_knows_its_version():
+    """Last on purpose: swaps the add-on for its extension build and back."""
+    if bpy.app.version < (4, 2, 0):
+        return
+    import subprocess
+    import addon_utils
+    package = _load_repo_module("package")
+    out = tempfile.mkdtemp(prefix="exh_ext_")
+    path, entries = package.build_extension(out)
+    _assert("blender_manifest.toml" in entries, entries)
+    cli = os.path.join(bpy.utils.system_resource("SCRIPTS"), "addons_core", "bl_pkg", "cli", "blender_ext.py")
+    if os.path.isfile(cli):
+        run = subprocess.run([sys.executable, "-I", cli, "validate", path], capture_output=True, text=True)
+        _assert(run.returncode == 0, "manifest rejected: %s%s" % (run.stdout, run.stderr))
+
+    module = "bl_ext.user_default.export_hub"
+    addon_utils.disable(ADDON_MODULE, default_set=True)
+    try:
+        bpy.ops.extensions.package_install_files(filepath=path, repo="user_default", enable_on_install=True)
+        _assert(module in bpy.context.preferences.addons, "extension did not enable")
+        updates = sys.modules[module + ".updates"]
+        expected = tuple(int(v) for v in package.version().split("."))
+        _assert(updates.current_version() == expected,
+                "Blender strips bl_info from extensions; the update check read %s"
+                % (updates.current_version(),))
+        _reset_scene()
+        _add_cube("Prop")
+        _select_only([bpy.data.objects["Prop"]])
+        bpy.ops.export_hub.add_project_from_template(engine="Unity")
+        prefs = bpy.context.preferences.addons[module].preferences
+        project = prefs.projects[prefs.active_project_index]
+        project.presets[0].export_dir = out
+        project.presets[0].filename_template = "{preset}"
+        _assert(bpy.ops.export_hub.export() == {"FINISHED"}, "export from the extension failed")
+        _assert(os.path.isfile(os.path.join(out, "Static Mesh.fbx")), os.listdir(out))
+    finally:
+        addon_utils.disable(module, default_set=True)
+        repo_index = [r.module for r in bpy.context.preferences.extensions.repos].index("user_default")
+        bpy.ops.extensions.package_uninstall(repo_index=repo_index, pkg_id="export_hub")
+        addon_utils.enable(ADDON_MODULE, default_set=True)
 
 
 def main():
