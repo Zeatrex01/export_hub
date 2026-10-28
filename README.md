@@ -320,16 +320,17 @@ Note that it compares against published **Releases**, not commits or tags.
 
 `tests/test_export_hub.py` drives the add-on the way a user does — creating projects from
 templates, validating, exporting real FBX files and reading them back — and exits non-zero on
-any failure:
+any failure. Start it with the launcher:
 
 ```
-blender --background --factory-startup --python tests/test_export_hub.py
+python tests/run_tests.py /path/to/blender     # a Blender build
+python tests/run_tests.py                      # the bpy module from PyPI (pip install bpy)
 ```
 
-It also runs with the `bpy` module from PyPI (`pip install bpy`, then
-`python tests/test_export_hub.py`). Set `EXH_TESTS=name,other` to run only the tests whose
-names contain those words. The suite writes to Blender's user folders, so run it with a
-throwaway `HOME` (or `BLENDER_USER_RESOURCES`) rather than your everyday profile.
+The suite deletes and rewrites Blender's user preferences and installs and removes the add-on,
+so the launcher points every Blender user folder at a temporary profile and deletes it
+afterwards; started any other way, the suite refuses to run. Set `EXH_TESTS=name,other` to run
+only the tests whose names contain those words.
 
 ## Building the zip
 

@@ -1,12 +1,13 @@
 """End-to-end test harness for the Export Hub Blender add-on.
 
-Run headless with:
+Run it with the launcher, which gives Blender a throwaway profile:
 
-    blender --background --factory-startup --python tests/test_export_hub.py
+    python tests/run_tests.py /path/to/blender     # a Blender build
+    python tests/run_tests.py                      # the bpy module (pip install bpy)
 
-or, with the ``bpy`` module from PyPI (``pip install bpy``):
-
-    python tests/test_export_hub.py
+The suite deletes and rewrites userpref.blend, installs and removes the add-on and
+an extension, so it refuses to run against a real profile: started any other way,
+it exits before touching anything.
 
 The harness and its first nine tests come from PR #1
 (cursor/setup-blender-dev-environment-5287); the regression tests after them
@@ -1189,7 +1190,9 @@ def test_zz_extension_package_installs_and_knows_its_version():
         _assert(run.returncode == 0, "manifest rejected: %s%s" % (run.stdout, run.stderr))
 
     module = "bl_ext.user_default.export_hub"
-    addon_utils.disable(ADDON_MODULE, default_set=True)
+    _prefs().projects.add().name = "Kept"
+    # default_set=False: the classic add-on stays in the preferences, with its data.
+    addon_utils.disable(ADDON_MODULE, default_set=False)
     try:
         bpy.ops.extensions.package_install_files(filepath=path, repo="user_default", enable_on_install=True)
         _assert(module in bpy.context.preferences.addons, "extension did not enable")
@@ -1213,16 +1216,38 @@ def test_zz_extension_package_installs_and_knows_its_version():
         repo_index = [r.module for r in bpy.context.preferences.extensions.repos].index("user_default")
         bpy.ops.extensions.package_uninstall(repo_index=repo_index, pkg_id="export_hub")
         addon_utils.enable(ADDON_MODULE, default_set=True)
+    _assert("Kept" in [p.name for p in _prefs().projects],
+            "swapping in the extension wiped the classic add-on's projects")
+
+
+def _profile_is_throwaway():
+    """True when every Blender user folder this suite writes to is the launcher's temp profile."""
+    profile = os.environ.get("EXH_TEST_PROFILE")
+    if not profile:
+        return False
+    root = os.path.normcase(os.path.realpath(profile)) + os.sep
+    folders = [bpy.utils.user_resource(kind) for kind in ("CONFIG", "SCRIPTS")]
+    if bpy.app.version >= (4, 2, 0):
+        folders.append(bpy.utils.user_resource("EXTENSIONS"))
+    return all(os.path.normcase(os.path.realpath(f)).startswith(root) for f in folders)
 
 
 def main():
     print("Blender:", bpy.app.version_string)
+    if not _profile_is_throwaway():
+        print("Refusing to run: this suite deletes and rewrites Blender's user preferences and "
+              "add-ons. Start it with  python tests/run_tests.py [path/to/blender]  so it gets "
+              "a throwaway profile.")
+        sys.exit(2)
     _install_addon()
 
     only = os.environ.get("EXH_TESTS", "")
     tests = [(name, func) for name, func in globals().items()
              if name.startswith("test_") and callable(func)
              and (not only or any(part in name for part in only.split(",")))]
+    # Tests named test_zz_ swap the installed add-on out and back; they run last
+    # whatever their place in the file.
+    tests.sort(key=lambda item: item[0].startswith("test_zz_"))
     for name, func in tests:
         _run(name[len("test_"):], func)
 
