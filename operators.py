@@ -1120,9 +1120,11 @@ class EXH_OT_import_presets(bpy.types.Operator, ImportHelper):
     def execute(self, context):
         prefs = config.get_prefs(context)
         try:
-            with open(self.filepath, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, json.JSONDecodeError) as exc:
+            # Bytes, so json picks the encoding: UTF-8 with or without a BOM, and the
+            # UTF-16 that Windows PowerShell 5.1 writes by default.
+            with open(self.filepath, "rb") as fh:
+                data = json.loads(fh.read())
+        except (OSError, ValueError) as exc:  # JSONDecodeError and UnicodeDecodeError
             self.report({'ERROR'}, "Could not read file: %s" % exc)
             return {'CANCELLED'}
         try:

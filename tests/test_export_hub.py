@@ -340,6 +340,51 @@ def test_json_import_refuses_malformed_file_and_keeps_projects():
                 % (data, [p.name for p in prefs.projects]))
         _assert(len(prefs.projects[0].presets) == 3, "presets lost after refusing %s" % (data,))
 
+    # Values JSON allows but Blender cannot store: an infinite index, a lone surrogate.
+    for text in ('{"config_version": 2, "projects": [{"name": "X", "active_preset_index": 1e999,'
+                 ' "presets": [{"name": "A"}]}, {"name": "Y"}]}',
+                 '{"config_version": 2, "projects": [{"name": "\\ud800", "presets": [{"name": "\\ud800"}]}]}'):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        result = _call(bpy.ops.export_hub.import_presets, filepath=path, mode='REPLACE')
+        _assert("Traceback" not in str(result), "import crashed on %s: %s" % (text, result))
+        names = [p.name for p in prefs.projects]
+        _assert(names == ["Unity"] or (result == {"FINISHED"} and "Unity" not in names and names),
+                "projects half-replaced by %s: %s" % (text, names))
+        prefs.projects.clear()
+        _make_project_from_engine("Unity", out)
+
+    # A failure part-way through loading puts the projects back as they were.
+    from export_hub import config
+    real = config._dict_to_preset
+
+    def failing(preset, data):
+        if data.get("name") == "3":   # the file's third preset, after two loaded fine
+            raise RuntimeError("simulated")
+        return real(preset, data)
+
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"config_version": 2, "projects": [
+            {"name": "A", "presets": [{"name": "1"}, {"name": "2"}]}, {"name": "B", "presets": [{"name": "3"}]}]}, fh)
+    config._dict_to_preset = failing
+    try:
+        result = _call(bpy.ops.export_hub.import_presets, filepath=path, mode='REPLACE')
+    finally:
+        config._dict_to_preset = real
+    _assert(result != {"FINISHED"}, "a failed load must not report success")
+    _assert([p.name for p in prefs.projects] == ["Unity"] and len(prefs.projects[0].presets) == 3,
+            "the projects were not put back: %s" % [p.name for p in prefs.projects])
+    _assert(prefs.projects[0].presets[0].export_dir == out, "a restored preset lost its settings")
+
+    # Files saved as UTF-16 (PowerShell 5.1's default) or with a UTF-8 BOM load.
+    for encoding in ("utf-16", "utf-8-sig"):
+        with open(path, "w", encoding=encoding) as fh:
+            json.dump({"config_version": 2, "projects": [{"name": "Enc", "presets": [{"name": "A"}]}]}, fh)
+        result = _call(bpy.ops.export_hub.import_presets, filepath=path, mode='APPEND')
+        _assert(result == {"FINISHED"}, "%s file refused: %s" % (encoding, result))
+        _assert(prefs.projects[len(prefs.projects) - 1].name == "Enc", [p.name for p in prefs.projects])
+        prefs.projects.remove(len(prefs.projects) - 1)
+
     # Odd but readable values are tolerated rather than crashing the import.
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"config_version": 2, "projects": [

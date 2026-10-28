@@ -52,6 +52,18 @@ def get_prefs(context):
     return addon.preferences if addon else None
 
 
+# What setting a value from a JSON file can raise: a wrong type, an unknown enum
+# item, a number too large (1e999 parses as infinity), text Blender cannot store.
+_BAD_VALUE = (TypeError, ValueError, OverflowError)
+
+
+def _text(value, default):
+    """A JSON value as text Blender can store (a lone surrogate cannot be)."""
+    if value is None:
+        return default
+    return str(value).encode("utf-8", "replace").decode("utf-8")
+
+
 def _fbx_to_dict(fbx):
     out = {}
     for key in FBX_SETTING_KEYS:
@@ -72,7 +84,7 @@ def _dict_to_fbx(fbx, data):
                 setattr(fbx, key, set(val))
             else:
                 setattr(fbx, key, val)
-        except (TypeError, ValueError):
+        except _BAD_VALUE:
             pass
 
 
@@ -86,9 +98,12 @@ def _preset_to_dict(preset):
 def _dict_to_preset(preset, data):
     for key in PRESET_KEYS:
         if key in data:
+            value = data[key]
+            if isinstance(value, str):
+                value = _text(value, "")
             try:
-                setattr(preset, key, data[key])
-            except (TypeError, ValueError):
+                setattr(preset, key, value)
+            except _BAD_VALUE:
                 pass
     preset.enabled = bool(data.get("enabled", True))
     _dict_to_fbx(preset.fbx_settings, data.get("fbx", {}))
@@ -103,14 +118,14 @@ def project_to_dict(project):
 
 
 def dict_to_project(project, data):
-    project.name = str(data.get("name", "Project"))
+    project.name = _text(data.get("name"), "Project")
     project.presets.clear()
     for entry in data.get("presets", []):
         _dict_to_preset(project.presets.add(), entry)
     if len(project.presets):
         try:
             wanted = int(data.get("active_preset_index", 0))
-        except (TypeError, ValueError):
+        except _BAD_VALUE:
             wanted = 0
         project.active_preset_index = max(0, min(wanted, len(project.presets) - 1))
 
@@ -153,30 +168,34 @@ def data_to_projects(prefs, data, replace=True):
 
     Also migrates v1 configs, where each entry was a flat project == single preset.
     Returns the number of projects loaded; raises ValueError, with nothing
-    changed, when the file is not a usable config.
+    changed, when the file is not a usable config. That holds even for a failure
+    part-way through loading: the projects as they were are kept as data first
+    and put back.
     """
     entries, is_legacy = _checked_entries(data)
+    before = projects_to_data(prefs)["projects"]
+    active_before = prefs.active_project_index
 
-    if replace:
+    number = 0
+    try:
+        if replace:
+            prefs.projects.clear()
+        for number, entry in enumerate(entries, 1):
+            project = prefs.projects.add()
+            if is_legacy or "presets" not in entry:
+                # v1: promote the flat project into a project with one preset.
+                project.name = _text(entry.get("name"), "Project")
+                preset = project.presets.add()
+                _dict_to_preset(preset, {k: v for k, v in entry.items() if k != "name"})
+                preset.name = "Default"
+            else:
+                dict_to_project(project, entry)
+    except Exception as exc:  # anything at all: the user's projects come first
         prefs.projects.clear()
-
-    for entry in entries:
-        project = prefs.projects.add()
-        if is_legacy or "presets" not in entry:
-            # v1: promote the flat project into a project with one preset.
-            project.name = str(entry.get("name", "Project"))
-            preset = project.presets.add()
-            preset.name = "Default"
-            for key in PRESET_KEYS:
-                if key in entry and key != "name":
-                    try:
-                        setattr(preset, key, entry[key])
-                    except (TypeError, ValueError):
-                        pass
-            preset.name = "Default"
-            _dict_to_fbx(preset.fbx_settings, entry.get("fbx", {}))
-        else:
-            dict_to_project(project, entry)
+        for entry in before:
+            dict_to_project(prefs.projects.add(), entry)
+        prefs.active_project_index = active_before
+        raise ValueError("project %d could not be loaded (%s)" % (number, exc))
 
     if len(prefs.projects):
         prefs.active_project_index = min(prefs.active_project_index, len(prefs.projects) - 1)
