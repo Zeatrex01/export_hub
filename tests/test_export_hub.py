@@ -349,6 +349,55 @@ def test_json_import_refuses_malformed_file_and_keeps_projects():
     _assert([p.name for p in prefs.projects] == ["Unity", "5"], [p.name for p in prefs.projects])
 
 
+def test_history_reexport_repeats_the_recorded_export():
+    from export_hub import operators
+    _reset_scene()
+    chair = _add_cube("Chair")
+    chair.scale = (2.0, 2.0, 2.0)
+    table = _add_cube("Table", location=(3, 0, 0))
+    other = _add_cube("Other", location=(6, 0, 0))
+    out = tempfile.mkdtemp(prefix="exh_hist_")
+    project = _make_project_from_engine("Unity", out, filename_template="{object}")
+    project.active_preset_index = 0
+    preset = project.presets[0]
+    preset.split_per_object = True
+    preset.apply_transform_before_export = True
+    _select_only([chair, table])
+    _assert(bpy.ops.export_hub.export() == {"FINISHED"}, "first export failed")
+    prefs = _prefs()
+    index = next(i for i, e in enumerate(prefs.history) if e.name == "Chair.fbx")
+
+    # The user has moved on: another object is selected now.
+    _select_only([other])
+    seen = []
+    real_export = operators._export_fbx
+
+    def spy(context, filepath, kwargs):
+        seen.append((os.path.basename(filepath),
+                     sorted((o.name, tuple(round(v, 3) for v in o.scale)) for o in context.selected_objects)))
+        return real_export(context, filepath, kwargs)
+
+    operators._export_fbx = spy
+    try:
+        result = bpy.ops.export_hub.history_reexport(index=index)
+    finally:
+        operators._export_fbx = real_export
+    _assert(result == {"FINISHED"}, "re-export failed: %s" % (result,))
+    _assert(seen == [("Chair.fbx", [("Chair", (1.0, 1.0, 1.0))])],
+            "re-export should write the recorded object, baked again: %s" % seen)
+    _assert(_fbx_objects(os.path.join(out, "Chair.fbx"), b"Model") == ["Chair"],
+            _fbx_objects(os.path.join(out, "Chair.fbx"), b"Model"))
+    _assert(list(bpy.context.selected_objects) == [other] and bpy.context.view_layer.objects.active == other,
+            "selection not restored after the re-export")
+    _assert(tuple(chair.scale) == (2.0, 2.0, 2.0), "original object was modified")
+    _assert(prefs.history[0].name == "Chair.fbx" and prefs.history[0].baked,
+            "the re-export's own history entry should repeat the recording")
+
+    chair.name = "Stool"
+    result = _call(bpy.ops.export_hub.history_reexport, index=0)
+    _assert(result != {"FINISHED"}, "re-export of an object that is gone should be refused")
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",

@@ -33,8 +33,13 @@ def _active_preset(context):
     return prefs, project, None
 
 
-def _record_history(context, project_name, preset_name, filepath, kwargs):
-    """Prepend an export to the history list, newest first, capped to MAX_HISTORY."""
+def _record_history(context, project_name, preset_name, filepath, kwargs, object_names=(), baked=False):
+    """Prepend an export to the history list, newest first, capped to MAX_HISTORY.
+
+    object_names are the original objects written to the file (empty for a
+    scene-wide export) and baked says they went through temporary copies; both are
+    what Re-export needs to repeat the export.
+    """
     prefs = config.get_prefs(context)
     if prefs is None:
         return
@@ -45,6 +50,8 @@ def _record_history(context, project_name, preset_name, filepath, kwargs):
     entry.preset_name = preset_name
     entry.timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     entry.fbx_json = config.fbx_kwargs_to_json(kwargs)
+    entry.object_names = json.dumps(list(object_names)) if object_names else ""
+    entry.baked = bool(baked)
     prefs.history.move(len(prefs.history) - 1, 0)
     while len(prefs.history) > config.MAX_HISTORY:
         prefs.history.remove(len(prefs.history) - 1)
@@ -495,7 +502,7 @@ def _export_fbx(context, filepath, kwargs):
     return True, filepath
 
 
-def _export_single(context, project, preset, kwargs, plan, export_dir_override=None):
+def _export_single(context, project, preset, kwargs, plan, export_dir_override=None, baked=False):
     """Export the whole export set to one file. Returns (status, message, folder)."""
     active = context.view_layer.objects.active
     display = next((name for obj, name in plan if obj is active), None)
@@ -515,11 +522,33 @@ def _export_single(context, project, preset, kwargs, plan, export_dir_override=N
     if not ok:
         return 'FAILED', message, None
 
-    _record_history(context, project.name, preset.name, filepath, kwargs)
+    names = [name for _obj, name in plan] if kwargs.get("use_selection") else ()
+    _record_history(context, project.name, preset.name, filepath, kwargs, names, baked)
     return 'DONE', filepath, export_dir
 
 
-def _export_per_object(context, project, preset, kwargs, plan, export_dir_override=None):
+def _restore_selection(context, selected, active):
+    """Put a saved selection back.
+
+    Every step guards itself: this runs on failure paths too, and a restore step
+    that raised there would replace the real error with its own.
+    """
+    try:
+        bpy.ops.object.select_all(action='DESELECT')
+    except RuntimeError:
+        pass
+    for obj in selected:
+        try:
+            obj.select_set(True)
+        except (ReferenceError, RuntimeError):
+            pass
+    try:
+        context.view_layer.objects.active = active
+    except (ReferenceError, RuntimeError):
+        pass
+
+
+def _export_per_object(context, project, preset, kwargs, plan, export_dir_override=None, baked=False):
     """Export every object in the plan to its own file. Returns (status, message, folder).
 
     The selection is driven one object at a time and put back afterwards: the
@@ -563,25 +592,11 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
             if ok:
                 written.append(filepath)
                 folder = folder or export_dir
-                _record_history(context, project.name, preset.name, filepath, kwargs)
+                _record_history(context, project.name, preset.name, filepath, kwargs, [display], baked)
             else:
                 failed.append("%s (%s)" % (display, message))
     finally:
-        # Every step guards itself: this runs on the failure path too, and a
-        # restore step that raises here would replace the real error with its own.
-        try:
-            bpy.ops.object.select_all(action='DESELECT')
-        except RuntimeError:
-            pass
-        for obj in was_selected:
-            try:
-                obj.select_set(True)
-            except (ReferenceError, RuntimeError):
-                pass
-        try:
-            context.view_layer.objects.active = was_active
-        except (ReferenceError, RuntimeError):
-            pass
+        _restore_selection(context, was_selected, was_active)
 
     if not written:
         if skipped and not failed:
@@ -645,13 +660,14 @@ def _run_export(context, project, preset, export_dir_override=None, save=True):
         # when the real objects are exported; with copies in play the object
         # written to the FBX is a throwaway duplicate, and _transformed_copies
         # has already paired each one with the name its file should use.
+        baked = plan is not None
         if plan is None:
             plan = [(obj, obj.name) for obj in context.selected_objects]
         # Splitting only means anything when the export set is the selection.
         if preset.split_per_object and fbx.use_selection:
             return _export_per_object(
-                context, project, preset, kwargs, plan, export_dir_override)
-        return _export_single(context, project, preset, kwargs, plan, export_dir_override)
+                context, project, preset, kwargs, plan, export_dir_override, baked)
+        return _export_single(context, project, preset, kwargs, plan, export_dir_override, baked)
 
     try:
         if on_copies:
@@ -1142,10 +1158,53 @@ class EXH_OT_export(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _history_object_names(entry):
+    try:
+        names = json.loads(entry.object_names or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+
+
+def _reexport(context, filepath, kwargs, names, baked):
+    """Repeat a recorded export. Returns (success, message).
+
+    With recorded object names the same objects are exported — through baked
+    copies again when the original export baked them — whatever is selected now,
+    and the selection is put back afterwards. Entries from before 1.8 carry no
+    names and export the current selection, as they always did.
+    """
+    if not names or not kwargs.get("use_selection"):
+        return _export_fbx(context, filepath, kwargs)
+
+    objects = [context.view_layer.objects.get(name) for name in names]
+    missing = [name for name, obj in zip(names, objects) if obj is None]
+    if missing:
+        return False, ("no longer in this view layer: %s — export from the preset instead"
+                       % ", ".join(missing))
+
+    was_selected = list(context.selected_objects)
+    was_active = context.view_layer.objects.active
+    try:
+        _deselect_all()
+        for obj in objects:
+            obj.select_set(True)
+        context.view_layer.objects.active = objects[0]
+        if baked:
+            with _transformed_copies(context, objects, bakes_animation=bool(kwargs.get("bake_anim"))):
+                return _export_fbx(context, filepath, kwargs)
+        return _export_fbx(context, filepath, kwargs)
+    except RuntimeError as exc:
+        return False, str(exc)
+    finally:
+        _restore_selection(context, was_selected, was_active)
+
+
 class EXH_OT_history_reexport(bpy.types.Operator):
     bl_idname = "export_hub.history_reexport"
     bl_label = "Re-export"
-    bl_description = "Export the current selection again to this entry's path with its saved settings"
+    bl_description = ("Export the same objects again to this entry's path with its saved settings, "
+                      "baking transforms again if the original export did")
 
     index: IntProperty(default=-1)
 
@@ -1157,11 +1216,15 @@ class EXH_OT_history_reexport(bpy.types.Operator):
             return {'CANCELLED'}
         entry = prefs.history[idx]
         kwargs = config.json_to_fbx_kwargs(entry.fbx_json)
-        ok, message = _export_fbx(context, entry.filepath, kwargs)
+        names = _history_object_names(entry)
+        baked = entry.baked
+        project_name, preset_name, filepath = entry.project_name, entry.preset_name, entry.filepath
+        ok, message = _reexport(context, filepath, kwargs, names, baked)
         if not ok:
             self.report({'ERROR'}, "Re-export failed: " + message)
             return {'CANCELLED'}
-        _record_history(context, entry.project_name, entry.preset_name, entry.filepath, kwargs)
+        # entry is not used past this point: adding to the collection can move it.
+        _record_history(context, project_name, preset_name, filepath, kwargs, names, baked)
         self.report({'INFO'}, "Re-exported: %s" % entry.filepath)
         save_preferences()
         return {'FINISHED'}

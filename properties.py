@@ -219,6 +219,11 @@ class EXH_HistoryEntry(bpy.types.PropertyGroup):
     preset_name: StringProperty(default="")
     timestamp: StringProperty(default="")
     fbx_json: StringProperty(default="")      # snapshot of the FBX kwargs used
+    # What went into the file, so Re-export repeats this export rather than
+    # writing whatever happens to be selected now. Empty on entries recorded
+    # before 1.8, and on scene-wide exports.
+    object_names: StringProperty(default="")  # JSON list of the original objects' names
+    baked: BoolProperty(default=False)        # transforms were baked into temporary copies
 
 
 def save_preferences():

@@ -36,7 +36,8 @@ Project "Unity"                 Project "Unreal"
 - **One file per object** — optionally split the selection so every object exports separately.
 - **Your call on existing files** — per preset: overwrite, keep both, or skip.
 - **Export All** — run every enabled preset in a project in one click.
-- **Export history** — the last 50 exports, each re-runnable with the exact settings used.
+- **Export history** — the last 50 exports, each re-runnable with the exact settings used, on
+  the same objects, and through baked copies again when the original export baked transforms.
 - **Shareable config** — export projects and presets to JSON, import them on another machine.
 - **Auto-versioning** — optional version counter that bumps on every successful export.
 
@@ -318,6 +319,9 @@ has to be GPL-compatible — this is not a preference, it applies to every Blend
 - Re-exporting from history writes to that entry's original path, so `{date}` and `{version}`
   tokens are not re-resolved — it overwrites the original file rather than producing a new one.
   The **If the file exists** policy does not apply here: you picked a specific file to write again.
+  Re-export finds the objects by name: rename or delete one and it refuses rather than writing
+  something else into that file. Entries recorded by 1.7 or earlier carry no object names and
+  export the current selection.
 - Export All refuses to run if two presets resolve to the same output path, rather than
   letting one silently overwrite the other. Add `{preset}` to the filename template to
   separate them; projects created from an engine template already do. This is about the preset
