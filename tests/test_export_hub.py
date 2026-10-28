@@ -458,6 +458,50 @@ def test_template_notes_and_settings():
                 "%s: Unity recalculates tangents on import" % template.id)
 
 
+def test_buttons_respect_auto_save_preferences():
+    preferences = bpy.context.preferences
+    path = os.path.join(bpy.utils.user_resource("CONFIG"), "userpref.blend")
+    old = preferences.use_preferences_save
+    try:
+        preferences.use_preferences_save = False
+        preferences.is_dirty = False
+        if os.path.exists(path):
+            os.remove(path)
+        bpy.ops.export_hub.project_add()
+        _assert(not os.path.exists(path),
+                "with Auto-Save Preferences off a button must not write userpref.blend")
+        _assert(preferences.is_dirty, "the change should light up Save Preferences instead")
+        from export_hub import ui
+
+        class _Layout:
+            def __init__(self):
+                self.labels, self.operators = [], []
+
+            def row(self, **_kwargs):
+                return self
+
+            def label(self, text="", **_kwargs):
+                self.labels.append(text)
+
+            def operator(self, idname, **_kwargs):
+                self.operators.append(idname)
+                return type("Props", (), {})()
+
+        layout = _Layout()
+        ui._draw_unsaved_hint(layout, bpy.context)
+        _assert(layout.operators == ["export_hub.save_settings"] and "Auto-Save" in layout.labels[0],
+                "the panel should say the changes are unsaved: %s %s" % (layout.labels, layout.operators))
+        _assert(bpy.ops.export_hub.save_settings() == {"FINISHED"}, "Save Settings failed")
+        _assert(os.path.exists(path), "Save Settings writes the preferences on request")
+
+        preferences.use_preferences_save = True
+        os.remove(path)
+        bpy.ops.export_hub.project_add()
+        _assert(os.path.exists(path), "with Auto-Save Preferences on a button saves at once")
+    finally:
+        preferences.use_preferences_save = old
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",

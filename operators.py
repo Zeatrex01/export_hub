@@ -966,12 +966,13 @@ class EXH_OT_check_updates(bpy.types.Operator):
 class EXH_OT_save_settings(bpy.types.Operator):
     bl_idname = "export_hub.save_settings"
     bl_label = "Save Settings"
-    bl_description = ("Write all projects, presets and history to disk now. Every button in "
-                      "this add-on already saves; use this after typing into a field, which "
-                      "Blender does not route through an operator")
+    bl_description = ("Write all projects, presets and history to disk now (this saves all of "
+                      "Blender's preferences). With Auto-Save Preferences on, every button "
+                      "already saves; use this after typing into a field, which Blender does "
+                      "not route through an operator, or when auto-save is off")
 
     def execute(self, context):
-        if not save_preferences():
+        if not save_preferences(force=True):
             self.report({'ERROR'}, "Could not write preferences")
             return {'CANCELLED'}
         self.report({'INFO'}, "Settings saved")

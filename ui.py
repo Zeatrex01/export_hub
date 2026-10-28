@@ -3,6 +3,7 @@
 import bpy
 
 from . import config, templates, updates, validate
+from .properties import unsaved_preferences
 
 _CHECK_ICONS = {
     'ERROR': 'CANCEL',
@@ -77,6 +78,15 @@ def _draw_validation(layout, prefs, project_name="", preset_name=""):
 
     if hidden:
         column.label(text="%d passed check(s) hidden" % hidden, icon='BLANK1')
+
+
+def _draw_unsaved_hint(layout, context):
+    """With Auto-Save Preferences off, changes only last once the user saves them."""
+    if not unsaved_preferences(context):
+        return
+    row = layout.row(align=True)
+    row.label(text="Unsaved: Auto-Save Preferences is off", icon='ERROR')
+    row.operator("export_hub.save_settings", text="Save", icon='FILE_TICK')
 
 
 def _draw_update_banner(layout):
@@ -282,6 +292,7 @@ def draw_preferences(prefs, context):
     row.operator("export_hub.import_presets", icon='IMPORT')
     row.operator("export_hub.export_presets", icon='EXPORT')
     row.operator("export_hub.save_settings", icon='FILE_TICK')
+    _draw_unsaved_hint(layout, context)
 
     _draw_update_row(layout, prefs)
 
@@ -369,6 +380,7 @@ class EXH_PT_export(bpy.types.Panel):
             return
 
         _draw_update_banner(layout)
+        _draw_unsaved_hint(layout, context)
 
         if not len(prefs.projects):
             layout.label(text="No projects configured.", icon='INFO')

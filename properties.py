@@ -226,22 +226,39 @@ class EXH_HistoryEntry(bpy.types.PropertyGroup):
     baked: BoolProperty(default=False)        # transforms were baked into temporary copies
 
 
-def save_preferences():
-    """Write this add-on's preferences to disk. Returns True on success.
+def save_preferences(force=False):
+    """Persist this add-on's preferences. Returns True on success.
 
-    Blender only persists userpref.blend by itself when "Auto-Save Preferences"
-    is enabled, and plenty of users have it off. Without this call every project,
-    preset and history entry silently disappears when Blender closes.
+    Projects, presets and history live in userpref.blend, and Blender writes it
+    on quit only when "Auto-Save Preferences" is on. Writing it is all or
+    nothing: every preference goes to disk, not just this add-on's.
+
+    So with auto-save on, the file is written straight away, which only adds
+    safety against a crash. With it off the user has chosen to save preferences
+    themselves, and writing the file would also keep every other preference
+    they tried and did not mean to keep; the preferences are marked as changed
+    instead, which lights up Blender's Save Preferences button, and the add-on
+    says so in its panels. force=True is the add-on's own Save Settings button.
 
     Lives here rather than in config.py because config.py imports from this
     module; putting persistence next to the data it persists also keeps the
     dependency direction one-way.
     """
+    preferences = bpy.context.preferences
+    if not force and not preferences.use_preferences_save:
+        preferences.is_dirty = True
+        return True
     try:
         bpy.ops.wm.save_userpref()
     except RuntimeError:
         return False
     return True
+
+
+def unsaved_preferences(context):
+    """True when this add-on's changes wait for the user to save preferences."""
+    preferences = context.preferences
+    return not preferences.use_preferences_save and preferences.is_dirty
 
 
 # Blender keeps pointers to the strings an items callback hands back, so the
