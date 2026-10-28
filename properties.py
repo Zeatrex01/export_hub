@@ -251,23 +251,26 @@ def save_preferences(force=False):
     nothing: every preference goes to disk, not just this add-on's.
 
     So with auto-save on, the file is written straight away, which only adds
-    safety against a crash. With it off the user has chosen to save preferences
-    themselves, and writing the file would also keep every other preference
-    they tried and did not mean to keep; the preferences are marked as changed
-    instead, which lights up Blender's Save Preferences button, and the add-on
-    says so in its panels. force=True is the add-on's own Save Settings button.
+    safety against a crash. With it off, the file is still written when nothing
+    else is waiting to be saved — then only this add-on's change goes to disk,
+    and a quit cannot lose the user's projects. When the user has other unsaved
+    preferences (they turned auto-save off to try things), writing the file
+    would keep those too; the change waits instead, Blender's Save Preferences
+    stays lit and the add-on's panels say so. force=True is the add-on's own
+    Save Settings button.
 
     Lives here rather than in config.py because config.py imports from this
     module; putting persistence next to the data it persists also keeps the
     dependency direction one-way.
     """
     preferences = bpy.context.preferences
-    if not force and not preferences.use_preferences_save:
-        preferences.is_dirty = True
+    if not force and not preferences.use_preferences_save and preferences.is_dirty:
         return True
     try:
         bpy.ops.wm.save_userpref()
     except RuntimeError:
+        # Left marked as changed, so auto-save on quit still tries.
+        preferences.is_dirty = True
         return False
     return True
 

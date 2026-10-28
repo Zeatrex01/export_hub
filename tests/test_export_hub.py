@@ -595,10 +595,46 @@ def test_failed_update_check_is_retried():
     updates._state.update(status="error", latest=None, message="offline")
     updates._redraw_when_done()
     _assert(prefs.last_update_check == "", "a failed check must not count as today's check")
-    updates._state.update(status="current", latest=(1, 8, 0), message="")
-    updates._redraw_when_done()
-    _assert(prefs.last_update_check == datetime.date.today().isoformat(),
-            "a completed check is recorded: %r" % prefs.last_update_check)
+    preferences = bpy.context.preferences
+    old = preferences.use_preferences_save
+    try:
+        preferences.use_preferences_save = True
+        preferences.is_dirty = False
+        updates._state.update(status="current", latest=(1, 8, 0), message="")
+        updates._redraw_when_done()
+        _assert(prefs.last_update_check == datetime.date.today().isoformat(),
+                "a completed check is recorded: %r" % prefs.last_update_check)
+        _assert(preferences.is_dirty, "auto-save on quit only writes changed preferences")
+    finally:
+        preferences.use_preferences_save = old
+    updates.reset()
+
+
+def test_update_worker_does_not_read_blender_data():
+    import io
+    import json
+    from export_hub import updates
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    real_open, real_version = updates.urllib.request.urlopen, updates.current_version
+    updates.urllib.request.urlopen = lambda *_a, **_k: _Response(json.dumps({"tag_name": "v9.0.0"}).encode())
+
+    def not_from_the_thread():
+        raise AssertionError("current_version() called from the worker thread")
+
+    updates.current_version = not_from_the_thread
+    try:
+        updates._worker((1, 8, 0))
+    finally:
+        updates.urllib.request.urlopen, updates.current_version = real_open, real_version
+    _assert(updates.state()["status"] == "available" and updates.state()["latest"] == (9, 0, 0),
+            updates.state())
     updates.reset()
 
 
@@ -631,14 +667,24 @@ def test_buttons_respect_auto_save_preferences():
     path = os.path.join(bpy.utils.user_resource("CONFIG"), "userpref.blend")
     old = preferences.use_preferences_save
     try:
+        # Auto-save off and nothing else changed: saving keeps the projects and writes
+        # nothing the user did not change — the same as 1.7, no data loss on quit.
         preferences.use_preferences_save = False
         preferences.is_dirty = False
         if os.path.exists(path):
             os.remove(path)
         bpy.ops.export_hub.project_add()
+        _assert(os.path.exists(path), "with nothing else unsaved, the add-on's change is saved")
+        _assert(not preferences.is_dirty, "and nothing is left unsaved")
+
+        # Auto-save off with other unsaved preferences: those are not saved behind the
+        # user's back; the change waits, and the panel says so.
+        os.remove(path)
+        preferences.is_dirty = True
+        bpy.ops.export_hub.project_add()
         _assert(not os.path.exists(path),
-                "with Auto-Save Preferences off a button must not write userpref.blend")
-        _assert(preferences.is_dirty, "the change should light up Save Preferences instead")
+                "other unsaved preferences must not be written by an add-on button")
+        _assert(preferences.is_dirty, "Save Preferences should stay lit")
         from export_hub import ui
 
         class _Layout:
@@ -666,6 +712,23 @@ def test_buttons_respect_auto_save_preferences():
         os.remove(path)
         bpy.ops.export_hub.project_add()
         _assert(os.path.exists(path), "with Auto-Save Preferences on a button saves at once")
+
+        # A save that fails leaves the preferences marked, so auto-save on quit retries.
+        import types
+        from export_hub import properties
+
+        def refuse():
+            raise RuntimeError("disk full")
+
+        preferences.is_dirty = False
+        real_bpy = properties.bpy
+        properties.bpy = types.SimpleNamespace(
+            context=bpy.context, ops=types.SimpleNamespace(wm=types.SimpleNamespace(save_userpref=refuse)))
+        try:
+            _assert(properties.save_preferences() is False, "a failed save must say so")
+        finally:
+            properties.bpy = real_bpy
+        _assert(preferences.is_dirty, "a failed save must leave the preferences marked as changed")
     finally:
         preferences.use_preferences_save = old
 

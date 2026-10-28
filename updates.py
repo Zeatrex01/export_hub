@@ -114,9 +114,15 @@ def _record_completed_check():
     prefs = config.get_prefs(bpy.context)
     if prefs is not None:
         prefs.last_update_check = datetime.date.today().isoformat()
+        # Auto-save writes the preferences on quit only when they changed. With it
+        # off the date is left for the user's next save rather than lighting up
+        # Save Preferences over an update check.
+        if bpy.context.preferences.use_preferences_save:
+            bpy.context.preferences.is_dirty = True
 
 
-def _worker():
+def _worker(installed):
+    """Runs on a thread: plain data in (the installed version), plain data out."""
     try:
         request = urllib.request.Request(
             RELEASES_API,
@@ -140,7 +146,7 @@ def _worker():
         latest = _parse_version(payload.get("tag_name", ""))
         if latest is None:
             result = ("error", None, "Could not read the release tag")
-        elif latest > current_version():
+        elif latest > installed:
             result = ("available", latest, "")
         else:
             result = ("current", latest, "")
@@ -177,7 +183,9 @@ def start_check():
         _state["latest"] = None
         _state["message"] = ""
 
-    threading.Thread(target=_worker, daemon=True).start()
+    # Read here, on the main thread: for an extension it goes through addon_utils,
+    # which is not something to call from the worker.
+    threading.Thread(target=_worker, args=(current_version(),), daemon=True).start()
     if not bpy.app.timers.is_registered(_redraw_when_done):
         bpy.app.timers.register(_redraw_when_done, first_interval=0.5, persistent=True)
     return True

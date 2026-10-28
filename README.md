@@ -373,7 +373,8 @@ has to be GPL-compatible — this is not a preference, it applies to every Blend
 - Projects, presets and history are stored with Blender's preferences. With **Auto-Save
   Preferences** on (Blender's default), every button writes them at once; fields you type into
   directly (export folder, filename template) are written on your next export or button press.
-  With it off, the add-on does not save Blender's preferences behind your back: the panel shows
+  With it off, buttons still save when nothing else is waiting to be saved. If you have other
+  unsaved preferences, the add-on does not write those behind your back: the panel shows
   *Unsaved* until you press **Save Settings** (or Blender's Save Preferences). Saving writes all
   of Blender's preferences, not only this add-on's.
 - Baking transforms requires the *Selected Objects* export mode, since the copies are made from
