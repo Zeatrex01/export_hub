@@ -93,7 +93,9 @@ resolved name before you export.
 Names are made safe for the filesystem automatically: illegal characters are replaced, trailing
 dots and spaces are trimmed (Windows drops those silently, which would land the file under a
 different name than the one you were shown), reserved device names like `CON` and `NUL` get a
-suffix, and very long names are capped so the `.fbx` extension and a `_001` suffix still fit.
+suffix (also when a dot follows, as in `CON.v001`), and very long names are capped at 200 bytes —
+bytes rather than letters, since macOS and Linux count bytes and a Turkish or Japanese letter takes
+two or three — so the `.fbx` extension and a `_001` suffix still fit.
 
 ## Engine templates
 
@@ -145,21 +147,31 @@ only care about what is wrong.
 | Check | Level |
 |---|---|
 | Nothing selected to export | error |
-| Negative scale — faces import inside out | error |
+| Mirroring (negative) scale that is not baked, or a mirror inherited from a parent — faces import inside out | error |
 | Mesh has no faces | error |
 | Armature has no bones | error |
-| Animation preset, but the rig has no action | error |
+| Animation preset, but nothing would be exported for the rig | error |
+| Baking scale into an animated armature — the export refuses it too | error |
 | One file per object is on, but the filename has no `{object}` | error |
 | Scene unit scale is not 1.0 | warning |
-| Scale or rotation not applied | warning |
+| Scale or rotation not applied (any rotation mode; delta transforms count) | warning |
+| Two negative scale axes — a 180° turn, not a mirror | warning |
 | Non-uniform scale | warning |
 | Mesh has no UV map | warning |
-| Rig has more than one root bone | warning |
+| Rig has more than one exported root bone (*Only Deform Bones* is taken into account) | warning |
 | Rig is yawed away from the `-Y` forward convention | warning |
 | Scene frame rate is not a standard rate | warning |
-| Action is longer than the scene frame range, so the bake will cut it | warning |
+| Action assigned without a slot (Blender 4.4+), so the exporter skips it | warning |
+| NLA Strips and All Actions both off, and the action is longer than the scene range, so the bake will cut it | warning |
+| One file per object would write a skinned mesh apart from its armature | warning |
 | Animation preset, but no armature is in the export set | warning |
 | None of the selected objects match the preset's object types | warning |
+
+Animation is judged the way the FBX exporter picks clips: one per NLA strip with *NLA Strips* on,
+one per action that fits the rig with *All Actions* on (each over its own frame range, so the
+scene range does not cut it), and the assigned action over the scene range only when both are
+off. *Visible Objects* and *Active Collection* narrow the checked objects the same way they
+narrow the export.
 
 **Only what the preset actually exports is checked.** A preset limited to meshes says nothing
 about a camera or a light you happen to have selected — they are not going into the file, so a
@@ -221,8 +233,15 @@ have quietly dropped objects, and with *One file per object* that means an FBX s
 from the folder, which is the kind of gap you only notice once the engine is short an asset.
 
 Validation knows about this: with baking on, an unapplied scale is reported as fine rather than
-as something to go and fix by hand. Negative scale is still an error, since baking it does not
-un-invert the normals.
+as something to go and fix by hand. An object's own mirroring scale is baked too — Blender keeps
+the faces pointing outward when it applies one — but a mirror inherited from a parent is not,
+because only the object's own transform is applied, so that stays an error.
+
+An **animated armature with a scale** other than 1 is refused when baking: applying scale
+rescales the rest pose but not the bone keys, so the animation would drift away from its mesh.
+Apply scale before animating, or leave baking off for that preset. The temporary copies use the
+originals' actions and materials, so the file carries `Run` and `Wood`, never `Run.001` or
+`Wood.001`, and nothing is left behind in your .blend.
 
 ## One file per object
 
@@ -232,7 +251,10 @@ exported separately and each recorded in history.
 
 The filename template must contain `{object}` — without it every object would resolve to the
 same path and only the last would survive, so the add-on refuses rather than quietly
-overwriting. The selection and the active object are restored afterwards.
+overwriting. The selection and the active object are restored afterwards. Two objects whose names
+clean up to the same filename (`Chair:1` and `Chair/1` both become `Chair_1.fbx`) are not
+allowed to overwrite each other either: the second is reported as failed. Splitting writes a
+skinned mesh without its armature, so validation warns about that for character rigs.
 
 ## When the file already exists
 

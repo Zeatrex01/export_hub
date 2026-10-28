@@ -523,6 +523,67 @@ def test_fbx_settings_cover_the_exporter():
     _assert(kept == {"use_tspace": True, "object_types": {"MESH"}}, "unknown values kept: %s" % kept)
 
 
+def test_filenames_fit_byte_limits_and_avoid_reserved_names():
+    from export_hub import config
+    long_name = config.sanitize_filename("ş" * 300)
+    _assert(len(long_name.encode("utf-8")) <= config.MAX_FILENAME,
+            "%d bytes: Linux and macOS limit a name to 255 bytes, not characters"
+            % len(long_name.encode("utf-8")))
+    _assert(long_name == "ş" * (config.MAX_FILENAME // 2), "cut inside a character: %r" % long_name[-3:])
+    _assert(config.sanitize_filename("CON.v001") == "CON_.v001",
+            "Windows reserves CON whatever follows the dot: %s" % config.sanitize_filename("CON.v001"))
+    _assert(config.sanitize_filename("lpt1 .old") == "lpt1_ .old", config.sanitize_filename("lpt1 .old"))
+    _assert(config.sanitize_filename("Console.v001") == "Console.v001", "only whole device names are reserved")
+
+
+def test_split_export_refuses_two_objects_on_one_file():
+    _reset_scene()
+    first = _add_cube("Chair:1")
+    second = _add_cube("Chair/1", location=(3, 0, 0))
+    out = tempfile.mkdtemp(prefix="exh_clash_")
+    project = _make_project_from_engine("Unity", out, filename_template="{object}")
+    project.active_preset_index = 0
+    preset = project.presets[0]
+    preset.split_per_object = True
+    preset.overwrite_mode = 'OVERWRITE'
+    _select_only([first, second])
+    from export_hub import operators
+    status, message = operators._run_export(bpy.context, project, preset, save=False)
+    _assert(_fbx_objects(os.path.join(out, "Chair_1.fbx"), b"Model") == ["Chair:1"],
+            "the second object overwrote the first one's file")
+    _assert("Chair/1" in message and "same file" in message, "the clash should be reported: %s" % message)
+    history = [e.name for e in _prefs().history]
+    _assert(history.count("Chair_1.fbx") == 1, "one file, one history entry: %s" % history)
+
+
+def test_validator_warns_when_split_separates_skin_from_rig():
+    from export_hub import validate
+    _reset_scene()
+    rig = _add_rig("Rig", action_name=None)
+    body = _add_cube("Body")
+    body.modifiers.new("Armature", 'ARMATURE').object = rig
+    body.parent = rig
+    out = tempfile.mkdtemp(prefix="exh_skin_")
+    project = _make_project_from_engine("Unity", out, filename_template="{object}")
+    preset = project.presets[1]
+    preset.split_per_object = True
+    _select_only([body, rig])
+    warnings = _messages(validate.run(bpy.context, project, preset), 'WARNING')
+    _assert(any("Body" in m and "Rig" in m and "separate" in m for m in warnings),
+            "splitting a skinned mesh from its armature should be flagged: %s" % warnings)
+
+
+def test_folder_fields_support_relative_paths():
+    if "is_path_supports_blend_relative" not in bpy.types.Property.bl_rna.properties:
+        return  # Blender before the option existed
+    from export_hub import properties, operators
+    fields = (properties.EXH_ExportPreset.bl_rna.properties["export_dir"],
+              bpy.ops.export_hub.export_dialog.get_rna_type().properties["custom_dir"])
+    for field in fields:
+        _assert(field.is_path_supports_blend_relative,
+                "%s should offer // paths in the file browser" % field.identifier)
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",

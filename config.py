@@ -18,16 +18,18 @@ CONFIG_VERSION = 2
 MAX_HISTORY = 50
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-# Windows refuses these as filenames whatever extension follows, so a template
+# Windows refuses these as filenames whatever extension follows ("CON.fbx", and
+# "CON.v001.fbx" too: only the part before the first dot counts), so a template
 # resolving to one of them cannot produce a file at all.
 _RESERVED_NAMES = frozenset(
     ("CON", "PRN", "AUX", "NUL")
-    + tuple("COM%d" % n for n in range(1, 10))
-    + tuple("LPT%d" % n for n in range(1, 10))
+    + tuple("COM%s" % n for n in "123456789¹²³")
+    + tuple("LPT%s" % n for n in "123456789¹²³")
 )
 
-# Leaves room inside the usual 255-byte component limit for ".fbx" and for the
-# "_001" that "Keep both" appends.
+# In UTF-8 bytes: Linux and macOS limit a name to 255 bytes, not characters, and
+# a Turkish or Japanese name takes two or three bytes per letter. Leaves room for
+# ".fbx" and for the "_001" that "Keep both" appends.
 MAX_FILENAME = 200
 
 # (token, human description) — single source of truth for the picker and docs.
@@ -209,7 +211,9 @@ def json_to_fbx_kwargs(text):
 
 def sanitize_filename(name):
     """Turn a resolved template into a name the filesystem will actually accept."""
-    cleaned = _INVALID_FILENAME_CHARS.sub("_", name).lstrip()[:MAX_FILENAME]
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", name).lstrip()
+    # Cut by bytes, never inside a character.
+    cleaned = cleaned.encode("utf-8")[:MAX_FILENAME].decode("utf-8", "ignore")
 
     # Trailing dots and spaces are trimmed in a loop rather than with one
     # strip().strip("."): "Chair. ." kept its trailing space that way, and Windows
@@ -218,8 +222,10 @@ def sanitize_filename(name):
     while cleaned and cleaned[-1] in " .":
         cleaned = cleaned[:-1]
 
-    if cleaned.upper() in _RESERVED_NAMES:
-        cleaned += "_"
+    stem, dot, rest = cleaned.partition(".")
+    device = stem.rstrip(" ")
+    if device.upper() in _RESERVED_NAMES:
+        cleaned = device + "_" + stem[len(device):] + dot + rest
     return cleaned or "export"
 
 

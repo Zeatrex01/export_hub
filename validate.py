@@ -243,6 +243,18 @@ def check_split_template(split_enabled, template):
     return [Check('OK', "One file per object, named from {object}")]
 
 
+def check_split_skin(mesh_name, armature_names):
+    """One file per object writes a skinned mesh without the armature that deforms it."""
+    if not armature_names:
+        return []
+    return [Check(
+        'WARNING',
+        "%s: deformed by %s, but one file per object writes them to separate files — "
+        "the engine gets the mesh unskinned. Turn splitting off for skinned characters"
+        % (mesh_name, ", ".join(sorted(armature_names))),
+    )]
+
+
 def check_mesh(name, polygon_count, uv_layer_count):
     """Mesh data problems an engine will reject, or silently shade wrong."""
     checks = []
@@ -598,6 +610,10 @@ def run(context, project, preset):
         if obj.type == 'MESH':
             polygons, uv_layers = _mesh_counts(context, obj, bool(fbx.use_mesh_modifiers))
             checks.extend(check_mesh(obj.name, polygons, uv_layers))
+            if splitting and 'ARMATURE' in types_exported:
+                rigs = {m.object.name for m in obj.modifiers
+                        if m.type == 'ARMATURE' and m.object is not None and m.object in objects}
+                checks.extend(check_split_skin(obj.name, rigs))
 
         elif obj.type == 'ARMATURE':
             scale, rotation, _own, _parent = _own_transform(obj)

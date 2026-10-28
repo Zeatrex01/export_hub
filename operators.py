@@ -10,7 +10,7 @@ from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import config, templates, updates, validate
-from .properties import FBX_SETTING_KEYS, save_preferences
+from .properties import FBX_SETTING_KEYS, PATH_OPTIONS, save_preferences
 
 
 def _active_project(context):
@@ -581,6 +581,9 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
     was_active = context.view_layer.objects.active
 
     written, skipped, failed, folder = [], [], [], None
+    # Two names can sanitise to one file ("Chair:1" and "Chair/1" both become
+    # Chair_1.fbx); the second would silently replace the first.
+    claimed = {}
     try:
         for obj, display in plan:
             _deselect_all()
@@ -598,6 +601,12 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
                 export_dir_override=export_dir_override)
             if error:
                 return 'FAILED', error, None
+            key = os.path.normcase(filepath)
+            if key in claimed:
+                failed.append("%s (same file as %s: %s — rename one)"
+                              % (display, claimed[key], os.path.basename(filepath)))
+                continue
+            claimed[key] = display
 
             # Per object, not per preset: one object already on disk should not
             # stop the rest of the selection from being written.
@@ -1380,7 +1389,7 @@ class EXH_OT_export_dialog(bpy.types.Operator):
         description=("Write this export somewhere else, just this once. The preset keeps "
                      "its saved folder"),
     )
-    custom_dir: StringProperty(name="Folder", subtype='DIR_PATH', default="")
+    custom_dir: StringProperty(name="Folder", subtype='DIR_PATH', default="", options=PATH_OPTIONS)
 
     def _selection(self, context):
         """(prefs, project, preset) for the current dialog choices."""

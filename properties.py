@@ -18,6 +18,13 @@ from bpy.props import (
     CollectionProperty,
 )
 
+# Lets the file browser offer // (relative to the .blend) for folder fields. The
+# option is newer than this add-on's oldest supported Blender, so it is only
+# asked for where it exists.
+PATH_OPTIONS = ({'PATH_SUPPORTS_BLEND_RELATIVE'}
+                if "is_path_supports_blend_relative" in bpy.types.Property.bl_rna.properties
+                else set())
+
 AXIS_ITEMS = [
     ('X', "X", ""), ('Y', "Y", ""), ('Z', "Z", ""),
     ('-X', "-X", ""), ('-Y', "-Y", ""), ('-Z', "-Z", ""),
@@ -151,7 +158,8 @@ class EXH_ExportPreset(bpy.types.PropertyGroup):
         name="Include in 'Export All'", default=True,
         description="When off, this preset is skipped by the Export All button",
     )
-    export_dir: StringProperty(name="Export Folder", subtype='DIR_PATH', default="")
+    export_dir: StringProperty(name="Export Folder", subtype='DIR_PATH', default="",
+                               options=PATH_OPTIONS)
     filename_template: StringProperty(
         name="Filename Template",
         default="{blend}",
