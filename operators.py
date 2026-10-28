@@ -578,8 +578,12 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
 
     written, skipped, failed, folder = [], [], [], None
     # Two names can sanitise to one file ("Chair:1" and "Chair/1" both become
-    # Chair_1.fbx); the second would silently replace the first.
+    # Chair_1.fbx), and "Crate" and "crate" are one file on macOS and Windows; the
+    # second would silently replace the first. Case is folded on every platform, so
+    # a project behaves the same wherever it is exported. "Keep both" numbers the
+    # second file instead, so it needs no check.
     claimed = {}
+    check_clash = preset.overwrite_mode != 'INCREMENT'
     try:
         for obj, display in plan:
             _deselect_all()
@@ -597,8 +601,8 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
                 export_dir_override=export_dir_override)
             if error:
                 return 'FAILED', error, None
-            key = os.path.normcase(filepath)
-            if key in claimed:
+            key = os.path.normcase(filepath).casefold()
+            if check_clash and key in claimed:
                 failed.append("%s (same file as %s: %s — rename one)"
                               % (display, claimed[key], os.path.basename(filepath)))
                 continue
@@ -647,7 +651,7 @@ def _first_collision(context, project, presets, export_dir_override=None):
             context, project, preset, export_dir_override=export_dir_override)
         if error:
             continue  # reported per preset when the export runs
-        key = os.path.normcase(filepath)
+        key = os.path.normcase(filepath).casefold()  # one file on macOS and Windows
         if key in seen:
             return ("'%s' and '%s' both export to %s — add {preset} to the filename template"
                     % (seen[key], preset.name, os.path.basename(filepath)))

@@ -767,6 +767,16 @@ def test_filenames_fit_byte_limits_and_avoid_reserved_names():
     _assert(config.sanitize_filename("Console.v001") == "Console.v001", "only whole device names are reserved")
 
 
+def test_export_all_refuses_presets_differing_only_in_case():
+    from export_hub import operators
+    out = tempfile.mkdtemp(prefix="exh_case_")
+    project = _make_project_from_engine("Unity", out, filename_template="Prop")
+    project.presets[1].filename_template = "prop"
+    project.presets[2].filename_template = "Other"
+    error = operators._first_collision(bpy.context, project, list(project.presets))
+    _assert(error and "both export to" in error, "Prop.fbx and prop.fbx are one file on macOS: %s" % error)
+
+
 def test_split_export_refuses_two_objects_on_one_file():
     _reset_scene()
     first = _add_cube("Chair:1")
@@ -785,6 +795,24 @@ def test_split_export_refuses_two_objects_on_one_file():
     _assert("Chair/1" in message and "same file" in message, "the clash should be reported: %s" % message)
     history = [e.name for e in _prefs().history]
     _assert(history.count("Chair_1.fbx") == 1, "one file, one history entry: %s" % history)
+
+    # macOS and Windows folders ignore case, so Crate and crate are one file there.
+    _reset_scene()
+    upper, lower = _add_cube("Crate"), _add_cube("crate", location=(3, 0, 0))
+    _select_only([upper, lower])
+    status, message = operators._run_export(bpy.context, project, preset, save=False)
+    _assert("same file" in message, "names differing only in case should clash: %s" % message)
+
+    # "Keep both" numbers the second file instead, so nothing is overwritten.
+    _reset_scene()
+    for name in os.listdir(out):
+        os.remove(os.path.join(out, name))
+    first, second = _add_cube("Chair:1"), _add_cube("Chair/1", location=(3, 0, 0))
+    preset.overwrite_mode = 'INCREMENT'
+    _select_only([first, second])
+    status, message = operators._run_export(bpy.context, project, preset, save=False)
+    _assert(sorted(os.listdir(out)) == ["Chair_1.fbx", "Chair_1_001.fbx"],
+            "Keep both should keep both: %s (%s)" % (sorted(os.listdir(out)), message))
 
 
 def test_validator_warns_when_split_separates_skin_from_rig():
