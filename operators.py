@@ -34,12 +34,14 @@ def _active_preset(context):
     return prefs, project, None
 
 
-def _record_history(context, project_name, preset_name, filepath, kwargs, object_names=(), baked=False):
+def _record_history(context, project_name, preset_name, filepath, kwargs, object_names=(), baked=False,
+                    baked_with=()):
     """Prepend an export to the history list, newest first, capped to MAX_HISTORY.
 
     object_names are the original objects written to the file (empty for a
-    scene-wide export) and baked says they went through temporary copies; both are
-    what Re-export needs to repeat the export.
+    scene-wide export), baked says they went through temporary copies and
+    baked_with is the whole selection those copies were made from; with the
+    .blend's path they are what Re-export needs to repeat the export.
     """
     prefs = config.get_prefs(context)
     if prefs is None:
@@ -53,6 +55,9 @@ def _record_history(context, project_name, preset_name, filepath, kwargs, object
     entry.fbx_json = config.fbx_kwargs_to_json(kwargs)
     entry.object_names = json.dumps(list(object_names)) if object_names else ""
     entry.baked = bool(baked)
+    wider = any(name not in object_names for name in baked_with)
+    entry.baked_with = json.dumps(list(baked_with)) if baked and wider else ""
+    entry.blend_path = bpy.data.filepath if object_names else ""
     prefs.history.move(len(prefs.history) - 1, 0)
     while len(prefs.history) > config.MAX_HISTORY:
         prefs.history.remove(len(prefs.history) - 1)
@@ -610,7 +615,8 @@ def _export_per_object(context, project, preset, kwargs, plan, export_dir_overri
             if ok:
                 written.append(filepath)
                 folder = folder or export_dir
-                _record_history(context, project.name, preset.name, filepath, kwargs, [display], baked)
+                _record_history(context, project.name, preset.name, filepath, kwargs, [display], baked,
+                                [name for _obj, name in plan])
             else:
                 failed.append("%s (%s)" % (display, message))
     finally:
@@ -1176,27 +1182,59 @@ class EXH_OT_export(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _history_object_names(entry):
+def _json_names(text):
     try:
-        names = json.loads(entry.object_names or "[]")
+        names = json.loads(text or "[]")
     except json.JSONDecodeError:
         return []
     return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
 
 
-def _reexport(context, filepath, kwargs, names, baked):
+def _same_blend(recorded, current):
+    if not recorded:
+        return True  # recorded in an unsaved file, or before 1.8
+    return os.path.normcase(os.path.abspath(recorded)) == os.path.normcase(os.path.abspath(current or ""))
+
+
+def _select_exactly(context, objects):
+    """Select these objects only; raise RuntimeError naming any Blender refused.
+
+    select_set() does nothing, without an error, on an object hidden in the
+    viewport (H, or the monitor icon), and the export would quietly leave it out.
+    """
+    _deselect_all()
+    for obj in objects:
+        try:
+            obj.select_set(True)
+        except RuntimeError:
+            pass
+    refused = [obj.name for obj in objects if not obj.select_get()]
+    if refused:
+        raise RuntimeError("cannot select %s (hidden?) — unhide it to re-export this file"
+                           % ", ".join(refused))
+    context.view_layer.objects.active = objects[0]
+
+
+def _reexport(context, filepath, kwargs, names, baked, baked_with=(), blend_path=""):
     """Repeat a recorded export. Returns (success, message).
 
     With recorded object names the same objects are exported — through baked
-    copies again when the original export baked them — whatever is selected now,
-    and the selection is put back afterwards. Entries from before 1.8 carry no
-    names and export the current selection, as they always did.
+    copies again when the original export baked them, made from the same
+    selection — whatever is selected now, and the selection is put back
+    afterwards. It refuses rather than write something else into the file: an
+    object that is gone or hidden, or an entry recorded in another .blend.
+    Entries from before 1.8 carry no names and export the current selection, as
+    they always did.
     """
     if not names or not kwargs.get("use_selection"):
         return _export_fbx(context, filepath, kwargs)
+    if not _same_blend(blend_path, bpy.data.filepath):
+        return False, ("this was exported from %s — open that file to re-export it"
+                       % os.path.basename(blend_path))
 
-    objects = [context.view_layer.objects.get(name) for name in names]
-    missing = [name for name, obj in zip(names, objects) if obj is None]
+    source_names = list(names) + [n for n in baked_with if n not in names] if baked else list(names)
+    objects = [context.view_layer.objects.get(name) for name in source_names]
+    missing = [name for name, obj in zip(source_names, objects) if obj is None]
     if missing:
         return False, ("no longer in this view layer: %s — export from the preset instead"
                        % ", ".join(missing))
@@ -1204,13 +1242,12 @@ def _reexport(context, filepath, kwargs, names, baked):
     was_selected = list(context.selected_objects)
     was_active = context.view_layer.objects.active
     try:
-        _deselect_all()
-        for obj in objects:
-            obj.select_set(True)
-        context.view_layer.objects.active = objects[0]
+        _select_exactly(context, objects)
         if baked:
             settings = types.SimpleNamespace(**kwargs) if kwargs.get("bake_anim") else None
-            with _transformed_copies(context, objects, anim_settings=settings):
+            with _transformed_copies(context, objects, anim_settings=settings) as plan:
+                # The whole set was baked; only the recorded objects go into the file.
+                _select_exactly(context, [copy for copy, name in plan if name in names])
                 return _export_fbx(context, filepath, kwargs)
         return _export_fbx(context, filepath, kwargs)
     except RuntimeError as exc:
@@ -1235,16 +1272,16 @@ class EXH_OT_history_reexport(bpy.types.Operator):
             return {'CANCELLED'}
         entry = prefs.history[idx]
         kwargs = config.json_to_fbx_kwargs(entry.fbx_json)
-        names = _history_object_names(entry)
-        baked = entry.baked
+        names = _json_names(entry.object_names)
+        baked, baked_with, blend_path = entry.baked, _json_names(entry.baked_with), entry.blend_path
         project_name, preset_name, filepath = entry.project_name, entry.preset_name, entry.filepath
-        ok, message = _reexport(context, filepath, kwargs, names, baked)
+        # entry is not used past this point: adding to the collection moves it.
+        ok, message = _reexport(context, filepath, kwargs, names, baked, baked_with, blend_path)
         if not ok:
             self.report({'ERROR'}, "Re-export failed: " + message)
             return {'CANCELLED'}
-        # entry is not used past this point: adding to the collection can move it.
-        _record_history(context, project_name, preset_name, filepath, kwargs, names, baked)
-        self.report({'INFO'}, "Re-exported: %s" % entry.filepath)
+        _record_history(context, project_name, preset_name, filepath, kwargs, names, baked, baked_with)
+        self.report({'INFO'}, "Re-exported: %s" % filepath)
         save_preferences()
         return {'FINISHED'}
 

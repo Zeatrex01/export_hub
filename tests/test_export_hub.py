@@ -398,6 +398,129 @@ def test_history_reexport_repeats_the_recorded_export():
     _assert(result != {"FINISHED"}, "re-export of an object that is gone should be refused")
 
 
+@__import__("contextlib").contextmanager
+def _captured_output():
+    """Capture what Blender prints to stdout (operator reports in background mode)."""
+    import ctypes
+    try:
+        flush_c = ctypes.CDLL(None).fflush
+    except (OSError, AttributeError):  # Windows: no C runtime to look up this way
+        flush_c = ctypes.cdll.msvcrt.fflush
+    sys.stdout.flush()
+    flush_c(None)
+    saved = os.dup(1)
+    capture = tempfile.TemporaryFile(mode="w+b")
+    os.dup2(capture.fileno(), 1)
+    lines = []
+    try:
+        yield lambda: lines
+    finally:
+        sys.stdout.flush()
+        flush_c(None)
+        os.dup2(saved, 1)
+        os.close(saved)
+        capture.seek(0)
+        lines.extend(capture.read().decode("utf-8", "replace").splitlines())
+        capture.close()
+
+
+def _spy_exports(record):
+    """Replace operators._export_fbx with a spy that records what each export writes.
+
+    Returns the function that undoes it.
+    """
+    from export_hub import operators
+    real_export = operators._export_fbx
+
+    def spy(context, filepath, kwargs):
+        record.append((os.path.basename(filepath), sorted(
+            (o.name,
+             tuple(round(v, 3) for v in o.matrix_world.to_euler()),
+             tuple(round(v, 3) for v in o.data.vertices[0].co) if o.type == 'MESH' else None)
+            for o in context.selected_objects)))
+        return real_export(context, filepath, kwargs)
+
+    operators._export_fbx = spy
+
+    def undo():
+        operators._export_fbx = real_export
+    return undo
+
+
+def test_history_reexport_refuses_what_it_cannot_repeat():
+    _reset_scene()
+    chair = _add_cube("Chair")
+    table = _add_cube("Table", location=(3, 0, 0))
+    out = tempfile.mkdtemp(prefix="exh_hist_hidden_")
+    project = _make_project_from_engine("Unity", out, filename_template="Set")
+    project.active_preset_index = 0
+    _select_only([chair, table])
+    _assert(bpy.ops.export_hub.export() == {"FINISHED"}, "first export failed")
+    prefs = _prefs()
+
+    table.hide_set(True)   # hidden with H: select_set() then quietly does nothing
+    result = _call(bpy.ops.export_hub.history_reexport, index=0)
+    _assert(result != {"FINISHED"}, "a hidden object would be dropped from the file")
+    _assert(sorted(_fbx_objects(os.path.join(out, "Set.fbx"), b"Model")) == ["Chair", "Table"],
+            "the good file was overwritten")
+    table.hide_set(False)
+
+    prefs.history[0].blend_path = os.path.join(out, "another.blend")
+    result = _call(bpy.ops.export_hub.history_reexport, index=0)
+    _assert(result != {"FINISHED"}, "an entry from another .blend must not write this file's objects")
+
+
+def test_history_reexport_bakes_a_split_export_with_its_parent():
+    import math
+    _reset_scene()
+    root = bpy.data.objects.new("Root", None)
+    bpy.context.collection.objects.link(root)
+    root.rotation_euler = (0.0, 0.0, math.radians(90))
+    chair = _add_cube("Chair")
+    chair.parent = root
+    bpy.context.view_layer.update()
+    out = tempfile.mkdtemp(prefix="exh_hist_parent_")
+    project = _make_project_from_engine("Unity", out, filename_template="{object}")
+    project.active_preset_index = 0
+    preset = project.presets[0]
+    preset.split_per_object = True
+    preset.apply_transform_before_export = True
+    _select_only([root, chair])
+    seen = []
+    undo = _spy_exports(seen)
+    try:
+        _assert(bpy.ops.export_hub.export() == {"FINISHED"}, "first export failed")
+        index = next(i for i, e in enumerate(_prefs().history) if e.name == "Chair.fbx")
+        first = [entry for entry in seen if entry[0] == "Chair.fbx"]
+        _select_only([])
+        _assert(bpy.ops.export_hub.history_reexport(index=index) == {"FINISHED"}, "re-export failed")
+    finally:
+        undo()
+    _assert(seen[-1] == first[0], "re-export baked differently:\n  first %s\n  again %s" % (first[0], seen[-1]))
+
+
+def test_history_reexport_reports_the_file_it_wrote():
+    from export_hub import config, operators
+    _reset_scene()
+    cube = _add_cube("Prop")
+    out = tempfile.mkdtemp(prefix="exh_hist_full_")
+    project = _make_project_from_engine("Unity", out, filename_template="{object}")
+    project.active_preset_index = 0
+    _select_only([cube])
+    prefs = _prefs()
+    prefs.history.clear()
+    for _number in range(config.MAX_HISTORY):
+        _assert(bpy.ops.export_hub.export() == {"FINISHED"}, "export failed")
+    oldest = prefs.history[len(prefs.history) - 1]
+    oldest.filepath = os.path.join(out, "Oldest.fbx")
+    oldest.name = "Oldest.fbx"
+    with _captured_output() as captured:
+        bpy.ops.export_hub.history_reexport(index=len(prefs.history) - 1)
+    reports = [line for line in captured() if "Re-exported" in line]
+    _assert(reports and reports[-1].rstrip().endswith("Oldest.fbx"),
+            "the report should name the file written: %s" % reports)
+
+
 def test_update_check_honours_online_access():
     import export_hub
     from export_hub import updates

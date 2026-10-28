@@ -237,6 +237,10 @@ class EXH_HistoryEntry(bpy.types.PropertyGroup):
     # before 1.8, and on scene-wide exports.
     object_names: StringProperty(default="")  # JSON list of the original objects' names
     baked: BoolProperty(default=False)        # transforms were baked into temporary copies
+    # The whole selection the bake was done over, when larger than object_names: a
+    # split export bakes everything in one go, so a child is baked with its parent.
+    baked_with: StringProperty(default="")    # JSON list of names
+    blend_path: StringProperty(default="")    # the .blend the objects live in
 
 
 def save_preferences(force=False):
