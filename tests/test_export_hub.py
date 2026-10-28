@@ -315,6 +315,40 @@ def test_json_config_roundtrip():
             "imported project lost its presets")
 
 
+def test_json_import_refuses_malformed_file_and_keeps_projects():
+    import json
+    out = tempfile.mkdtemp(prefix="exh_badjson_")
+    _make_project_from_engine("Unity", out)
+    prefs = _prefs()
+    path = os.path.join(out, "bad.json")
+    malformed = (
+        [1, 2],
+        {"config_version": 2},
+        {"config_version": 2, "projects": []},
+        {"config_version": 2, "projects": [1, 2]},
+        {"config_version": 2, "projects": [{"name": "X", "presets": "oops"}]},
+        {"config_version": 2, "projects": [{"name": "X", "presets": [{"fbx": [1]}]}]},
+        {"config_version": "two", "projects": [{"name": "X"}]},
+    )
+    for data in malformed:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        result = _call(bpy.ops.export_hub.import_presets, filepath=path, mode='REPLACE')
+        _assert(result != {"FINISHED"}, "malformed config accepted: %s" % (data,))
+        _assert([p.name for p in prefs.projects] == ["Unity"],
+                "a refused import must leave the projects alone (%s): %s"
+                % (data, [p.name for p in prefs.projects]))
+        _assert(len(prefs.projects[0].presets) == 3, "presets lost after refusing %s" % (data,))
+
+    # Odd but readable values are tolerated rather than crashing the import.
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"config_version": 2, "projects": [
+            {"name": 5, "active_preset_index": "x", "presets": [{"name": "A"}]}]}, fh)
+    result = _call(bpy.ops.export_hub.import_presets, filepath=path, mode='APPEND')
+    _assert(result == {"FINISHED"}, "tolerable config refused: %s" % (result,))
+    _assert([p.name for p in prefs.projects] == ["Unity", "5"], [p.name for p in prefs.projects])
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",

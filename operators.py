@@ -1085,7 +1085,11 @@ class EXH_OT_import_presets(bpy.types.Operator, ImportHelper):
         except (OSError, json.JSONDecodeError) as exc:
             self.report({'ERROR'}, "Could not read file: %s" % exc)
             return {'CANCELLED'}
-        count = config.data_to_projects(prefs, data, replace=(self.mode == 'REPLACE'))
+        try:
+            count = config.data_to_projects(prefs, data, replace=(self.mode == 'REPLACE'))
+        except ValueError as exc:
+            self.report({'ERROR'}, "Nothing imported, your projects are unchanged: %s" % exc)
+            return {'CANCELLED'}
         self.report({'INFO'}, "Imported %d project(s)" % count)
         save_preferences()
         return {'FINISHED'}

@@ -101,14 +101,16 @@ def project_to_dict(project):
 
 
 def dict_to_project(project, data):
-    project.name = data.get("name", "Project")
+    project.name = str(data.get("name", "Project"))
     project.presets.clear()
     for entry in data.get("presets", []):
         _dict_to_preset(project.presets.add(), entry)
     if len(project.presets):
-        project.active_preset_index = min(
-            int(data.get("active_preset_index", 0)), len(project.presets) - 1
-        )
+        try:
+            wanted = int(data.get("active_preset_index", 0))
+        except (TypeError, ValueError):
+            wanted = 0
+        project.active_preset_index = max(0, min(wanted, len(project.presets) - 1))
 
 
 def projects_to_data(prefs):
@@ -118,14 +120,40 @@ def projects_to_data(prefs):
     }
 
 
+def _checked_entries(data):
+    """(project entries, is_legacy) of a parsed config, or ValueError saying what is wrong.
+
+    Everything is checked before anything is loaded: Replace clears the user's
+    projects first, so a file that fails half-way would leave them with nothing.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("not an Export Hub config (expected a JSON object)")
+    version = data.get("config_version", CONFIG_VERSION)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError("config_version must be a whole number")
+    entries = data.get("projects")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("the file has no projects")
+    for number, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            raise ValueError("project %d is not a JSON object" % number)
+        presets = entry.get("presets", [])
+        if not isinstance(presets, list) or not all(isinstance(p, dict) for p in presets):
+            raise ValueError("project %d: presets must be a list of JSON objects" % number)
+        for block in [entry] + presets:
+            if not isinstance(block.get("fbx", {}), dict):
+                raise ValueError("project %d: fbx settings must be a JSON object" % number)
+    return entries, version < 2
+
+
 def data_to_projects(prefs, data, replace=True):
     """Load projects from a parsed JSON dict. replace clears existing first.
 
     Also migrates v1 configs, where each entry was a flat project == single preset.
-    Returns the number of projects loaded.
+    Returns the number of projects loaded; raises ValueError, with nothing
+    changed, when the file is not a usable config.
     """
-    entries = data.get("projects", []) if isinstance(data, dict) else []
-    is_legacy = data.get("config_version", CONFIG_VERSION) < 2
+    entries, is_legacy = _checked_entries(data)
 
     if replace:
         prefs.projects.clear()
@@ -134,7 +162,7 @@ def data_to_projects(prefs, data, replace=True):
         project = prefs.projects.add()
         if is_legacy or "presets" not in entry:
             # v1: promote the flat project into a project with one preset.
-            project.name = entry.get("name", "Project")
+            project.name = str(entry.get("name", "Project"))
             preset = project.presets.add()
             preset.name = "Default"
             for key in PRESET_KEYS:
