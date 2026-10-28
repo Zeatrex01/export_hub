@@ -171,7 +171,7 @@ only care about what is wrong.
 | Rig has more than one exported root bone (*Only Deform Bones* is taken into account) | warning |
 | Rig is yawed away from the `-Y` forward convention | warning |
 | Scene frame rate is not a standard rate | warning |
-| Action assigned without a slot (Blender 4.4+), so the exporter skips it | warning |
+| Action assigned without a slot (Blender 4.4+), so the exporter skips it | warning (error when the rig then exports no clip) |
 | NLA Strips and All Actions both off, and the action is longer than the scene range, so the bake will cut it | warning |
 | One file per object would write a skinned mesh apart from its armature | warning |
 | Animation preset, but no armature is in the export set | warning |
@@ -203,9 +203,10 @@ on that is the evaluated mesh, so geometry produced by a Skin modifier, a Mirror
 geometry nodes is counted — reading the base mesh reported "no faces" for models that export
 perfectly well.
 
-That last one is worth knowing about: the FBX exporter bakes over the **scene** frame range,
-not the action's, so an action running past `frame_end` exports truncated with no warning from
-Blender.
+The clip-length warning is worth knowing about: with *NLA Strips* and *All Actions* both off,
+the FBX exporter bakes over the **scene** frame range, not the action's, so an action running
+past `frame_end` exports truncated with no warning from Blender. The engine templates turn
+*All Actions* on, which bakes every action over its own range.
 
 **On rig orientation:** Validate reports the rig object's yaw, because that is what is
 actually knowable from the file. Whether the character *model* was sculpted facing the wrong
@@ -247,7 +248,8 @@ as something to go and fix by hand. An object's own mirroring scale is baked too
 the faces pointing outward when it applies one — but a mirror inherited from a parent is not,
 because only the object's own transform is applied, so that stays an error.
 
-An **animated armature with a scale** other than 1 is refused when baking: applying scale
+An **animated armature with a scale** other than 1 — its own or a parent's — is refused when
+baking: applying scale
 rescales the rest pose but not the bone keys, so the animation would drift away from its mesh.
 Apply scale before animating, or leave baking off for that preset. The temporary copies use the
 originals' actions and materials, so the file carries `Run` and `Wood`, never `Run.001` or
@@ -297,8 +299,8 @@ The add-on asks GitHub once a day whether a newer release exists, and shows a li
 sidebar when there is one. The request runs on a background thread, so Blender never stalls
 waiting for the network.
 
-Turn it off with **Check for updates** in Preferences — with it unchecked the add-on makes no
-network requests at all. **Check Now** runs one on demand. In Blender 4.2 and newer the add-on
+Turn it off with **Check for updates** in Preferences — with it unchecked the add-on never
+contacts the network on its own; **Check Now** still runs one check when you press it. In Blender 4.2 and newer the add-on
 also follows Blender's own **Preferences > System > Network > Allow Online Access**: while that
 is off (or Blender runs with `--offline-mode`) no check runs, not even from Check Now. A check
 that fails (offline, timeout) is tried again the next time Blender starts.

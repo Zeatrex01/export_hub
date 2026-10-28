@@ -337,8 +337,8 @@ class EXH_Preferences(bpy.types.AddonPreferences):
         default=True,
         description=(
             "Ask GitHub once a day whether a newer release of this add-on exists. "
-            "Turn off to stop the add-on contacting the network entirely. Never runs "
-            "while Blender's Allow Online Access is off"
+            "Turn off and the add-on never contacts the network on its own (Check Now "
+            "still asks when pressed). Never runs while Blender's Allow Online Access is off"
         ),
     )
     last_update_check: StringProperty(default="")  # ISO date, throttles to once a day
