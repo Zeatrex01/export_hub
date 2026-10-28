@@ -502,6 +502,27 @@ def test_buttons_respect_auto_save_preferences():
         preferences.use_preferences_save = old
 
 
+def test_fbx_settings_cover_the_exporter():
+    from export_hub import properties
+    known = set(bpy.ops.export_scene.fbx.get_rna_type().properties.keys())
+    # Not settings: the file dialog's own fields, and batch mode, which Export Hub's
+    # presets replace. use_mesh_modifiers_render has done nothing since Blender 2.8.
+    not_settings = {"rna_type", "filepath", "check_existing", "filter_glob", "collection",
+                    "batch_mode", "use_batch_own_dir", "use_mesh_modifiers_render", "use_metadata"}
+    missing = sorted(known - not_settings - set(properties.FBX_SETTING_KEYS))
+    _assert(not missing, "exporter options the presets cannot set: %s" % missing)
+    fbx = properties.EXH_FBXSettings.bl_rna.properties
+    smoothing = [item.identifier for item in fbx["mesh_smooth_type"].enum_items]
+    _assert("SMOOTH_GROUP" in smoothing, "Smoothing Groups missing: %s" % smoothing)
+
+    # A value this Blender's exporter does not know (a newer smoothing mode on an
+    # older Blender) is dropped, not passed on to fail the whole export.
+    from export_hub import operators
+    kept = operators._supported_fbx_kwargs({"mesh_smooth_type": "FROM_THE_FUTURE", "use_tspace": True,
+                                            "object_types": {"MESH", "HOLOGRAM"}})
+    _assert(kept == {"use_tspace": True, "object_types": {"MESH"}}, "unknown values kept: %s" % kept)
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",

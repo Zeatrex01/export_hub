@@ -462,20 +462,38 @@ def _apply_overwrite_mode(filepath, mode):
 
 
 def _supported_fbx_kwargs(kwargs):
-    """Drop arguments this Blender's FBX exporter does not accept.
+    """Drop arguments, and enum values, this Blender's FBX exporter does not accept.
 
     Blender adds and retires exporter options between versions. Passing one it
     does not know raises TypeError and kills the export outright, so the call is
     filtered against the operator's real signature rather than against an
-    assumption about which Blender is running.
+    assumption about which Blender is running. Enum values are checked too: a
+    smoothing mode or object type a newer Blender added fails the same way. An
+    unknown single value falls back to the exporter's default; an unknown flag
+    is dropped from its set.
     """
     try:
-        known = set(bpy.ops.export_scene.fbx.get_rna_type().properties.keys())
+        props = bpy.ops.export_scene.fbx.get_rna_type().properties
+        known = set(props.keys())
     except (AttributeError, RuntimeError):
         return kwargs  # cannot introspect; pass through and let the call decide
 
-    supported = {key: val for key, val in kwargs.items() if key in known}
-    dropped = sorted(set(kwargs) - set(supported))
+    supported, dropped = {}, sorted(set(kwargs) - known)
+    for key, val in kwargs.items():
+        if key not in known:
+            continue
+        prop = props[key]
+        if prop.type == 'ENUM':
+            items = {item.identifier for item in prop.enum_items}
+            if isinstance(val, (set, frozenset)):
+                unknown = set(val) - items
+                if unknown:
+                    dropped.append("%s %s" % (key, "/".join(sorted(unknown))))
+                    val = set(val) & items
+            elif val not in items:
+                dropped.append("%s=%s" % (key, val))
+                continue
+        supported[key] = val
     if dropped:
         # Not fatal, but the user configured these and they are not being
         # applied — say so on the console rather than pretending otherwise.

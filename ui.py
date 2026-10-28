@@ -257,6 +257,7 @@ def _draw_fbx_settings(layout, fbx):
     box.prop(fbx, "use_tspace")
     box.prop(fbx, "use_triangles")
     box.prop(fbx, "colors_type")
+    box.prop(fbx, "prioritize_active_color")
 
     box = layout.box()
     box.label(text="Armature", icon='ARMATURE_DATA')

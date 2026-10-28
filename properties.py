@@ -34,7 +34,7 @@ FBX_SETTING_KEYS = [
     "axis_forward", "axis_up", "use_space_transform", "bake_space_transform",
     # Geometry
     "mesh_smooth_type", "use_subsurf", "use_mesh_modifiers", "use_mesh_edges",
-    "use_tspace", "use_triangles", "colors_type",
+    "use_tspace", "use_triangles", "colors_type", "prioritize_active_color",
     # Armature
     "primary_bone_axis", "secondary_bone_axis", "armature_nodetype",
     "use_armature_deform_only", "add_leaf_bones",
@@ -92,7 +92,8 @@ class EXH_FBXSettings(bpy.types.PropertyGroup):
     # --- Geometry ---
     mesh_smooth_type: EnumProperty(
         name="Smoothing",
-        items=[('OFF', "Normals Only", ""), ('FACE', "Face", ""), ('EDGE', "Edge", "")],
+        items=[('OFF', "Normals Only", ""), ('FACE', "Face", ""), ('EDGE', "Edge", ""),
+               ('SMOOTH_GROUP', "Smoothing Groups", "")],
         default='OFF',
     )
     use_subsurf: BoolProperty(name="Export Subdivision Surface", default=False)
@@ -104,6 +105,10 @@ class EXH_FBXSettings(bpy.types.PropertyGroup):
         name="Vertex Colors",
         items=[('NONE', "None", ""), ('SRGB', "sRGB", ""), ('LINEAR', "Linear", "")],
         default='SRGB',
+    )
+    prioritize_active_color: BoolProperty(
+        name="Prioritize Active Color", default=False,
+        description="Write the active color attribute first; some importers keep only the first one",
     )
 
     # --- Armature ---

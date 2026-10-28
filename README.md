@@ -28,7 +28,8 @@ Project "Unity"                 Project "Unreal"
 ## Features
 
 - **Projects and presets** — group any number of export configurations per destination.
-- **Full FBX control** — every option from Blender's exporter, saved per preset.
+- **Full FBX control** — every setting of Blender's FBX exporter, saved per preset (batch mode
+  aside: presets and *One file per object* do that job). Options a given Blender lacks are skipped.
 - **Built-in engine templates** — ready-made settings for Unity, Unreal and Godot.
 - **Filename templates** — build output names from tokens like `{blend}`, `{object}`, `{date}`.
 - **Validate before export** — catch unapplied transforms, missing UVs, mirrored objects
