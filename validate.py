@@ -18,6 +18,11 @@ that touches Blender data, and all it does is read values and hand them over.
 import math
 from collections import namedtuple
 
+try:  # the rules below are plain Python; only run() and its helpers need Blender
+    import bpy
+except ImportError:  # pragma: no cover
+    bpy = None
+
 # level: 'ERROR'   almost certainly broken in the engine
 #        'WARNING' suspicious, usually a mistake, sometimes deliberate
 #        'INFO'    context: what was checked, and against what
@@ -60,26 +65,61 @@ _TRANSFORMABLE = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'ARMATURE', 'LATTI
 _SEVERITY = {'ERROR': 0, 'WARNING': 1, 'INFO': 2, 'OK': 3}
 
 
-def check_transform(name, scale, rotation_euler, baked_on_export=False):
+def check_transform(name, scale, rotation_euler, baked_on_export=False, own_mirror=None,
+                    parent_mirror=False):
     """Unapplied transforms on an object about to be exported.
 
-    `baked_on_export` says the preset will apply transforms to a temporary copy.
-    In that case an unapplied scale is not a problem to fix, and telling the user
-    to press Ctrl+A would be advising a destructive edit the add-on is about to
-    handle for them. Negative scale still matters — baking it does not un-invert
-    the normals.
+    `scale` and `rotation_euler` are the object's own transform as the engine
+    will receive it (run() decomposes the object's basis matrix, so quaternion
+    and axis-angle rotation modes and delta transforms count too).
+
+    Mirroring is a sign of the transform's determinant, not of any one scale
+    component: (-1, -1, 1) is a 180° turn, not a mirror. `own_mirror` says this
+    object's own transform mirrors (derived from `scale` when left out);
+    `parent_mirror` says a parent mirrors it.
+
+    `baked_on_export` says the preset will apply rotation and scale to a
+    temporary copy. Then an unapplied scale is not a problem to fix, and a
+    mirroring scale of the object's own is baked too: Blender keeps the faces
+    pointing outward when it applies a negative scale. A parent's mirror is not
+    baked, because only the object's own transform is applied.
     """
     checks = []
     sx, sy, sz = scale
+    if own_mirror is None:
+        own_mirror = sx * sy * sz < 0.0
+    magnitudes = (abs(sx), abs(sy), abs(sz))
 
-    if min(sx, sy, sz) < 0.0:
+    if parent_mirror and baked_on_export:
         checks.append(Check(
             'ERROR',
-            "%s: negative scale (%.3f, %.3f, %.3f) — faces will be inside out "
-            "in the engine. Apply scale, then flip normals." % (name, sx, sy, sz),
+            "%s: mirrored by a parent's negative scale — baking applies only this "
+            "object's own rotation and scale, so the faces will be inside out in "
+            "the engine. Apply scale on the parent." % name,
         ))
-    elif any(abs(s - 1.0) > _SCALE_TOLERANCE for s in (sx, sy, sz)):
-        uniform = abs(max(sx, sy, sz) - min(sx, sy, sz)) <= _SCALE_TOLERANCE
+    elif own_mirror != parent_mirror and not baked_on_export:
+        checks.append(Check(
+            'ERROR',
+            "%s: negative scale (%.3f, %.3f, %.3f)%s — faces will be inside out in "
+            "the engine. Apply scale (Ctrl+A), then Mesh > Normals > Recalculate "
+            "Outside if any face still looks inverted."
+            % (name, sx, sy, sz, " mirrored by a parent" if parent_mirror else ""),
+        ))
+    elif own_mirror and baked_on_export:
+        checks.append(Check(
+            'OK',
+            "%s: mirroring scale (%.3f, %.3f, %.3f) — baked into a temporary copy at "
+            "export; Blender keeps the faces pointing outward" % (name, sx, sy, sz),
+        ))
+    elif any(s < 0.0 for s in scale) and not own_mirror:
+        checks.append(Check(
+            'OK' if baked_on_export else 'WARNING',
+            "%s: scale (%.3f, %.3f, %.3f) is a 180° turn, not a mirror%s"
+            % (name, sx, sy, sz, " — baked into a temporary copy at export"
+               if baked_on_export else ", and it is not applied — Ctrl+A > Rotation & Scale"),
+        ))
+    elif any(abs(m - 1.0) > _SCALE_TOLERANCE for m in magnitudes):
+        uniform = abs(max(magnitudes) - min(magnitudes)) <= _SCALE_TOLERANCE
         if baked_on_export:
             checks.append(Check(
                 'OK',
@@ -114,6 +154,27 @@ def check_transform(name, scale, rotation_euler, baked_on_export=False):
         checks.append(Check('OK', "%s: rotation applied (0°, 0°, 0°)" % name))
 
     return checks
+
+
+def check_baked_animated_armature(name, scale, animated, baked_on_export):
+    """Baking scale into an animated armature breaks its animation.
+
+    transform_apply rescales the rest pose but not the pose-bone location keys,
+    so an armature with scale 2 and animated bones drifts away from its own mesh
+    (measured in Blender 5.2: 1 m off after a 1 m move). Export refuses this; the
+    validator says so beforehand.
+    """
+    if not (baked_on_export and animated):
+        return []
+    if any(abs(abs(s) - 1.0) > _SCALE_TOLERANCE for s in scale):
+        return [Check(
+            'ERROR',
+            "%s: animated armature with scale (%.3f, %.3f, %.3f) — baking would "
+            "rescale its rest pose but not its keys, so the animation would drift. "
+            "Apply scale before animating, or turn baking off for this preset; the "
+            "export refuses it." % ((name,) + tuple(scale)),
+        )]
+    return []
 
 
 def check_scene_units(unit_scale):
@@ -221,31 +282,57 @@ def check_rig_facing(name, z_rotation):
     )]
 
 
-def check_animation(name, has_action, action_name, action_range, scene_range):
-    """Animation-preset problems: nothing to bake, or a bake window that clips it."""
-    if not has_action:
-        return [Check(
-            'ERROR',
-            "%s: this preset bakes animation but the rig has no action assigned" % name,
-        )]
+def check_animation(name, clips, scene_range=None, scene_range_mode=False, unslotted_action=None,
+                    modes=""):
+    """Animation-preset problems, judged by what the FBX exporter will write.
 
-    if not (action_range and scene_range):
-        return [Check('OK', "%s: action '%s' assigned" % (name, action_name))]
+    `clips` is [(label, start, end)] the exporter will bake for this rig: one per
+    NLA strip with NLA Strips on, one per fitting action (over the action's own
+    frame range) with All Actions on, or, with both off, the assigned action over
+    the scene range (`scene_range_mode`). `unslotted_action` names an assigned
+    action without a slot (Blender 4.4+): the exporter skips it.
+    """
+    checks = []
+    if unslotted_action:
+        checks.append(Check(
+            'WARNING' if clips else 'ERROR',
+            "%s: action '%s' is assigned without a slot, so the exporter skips it — "
+            "pick its slot in the Action editor" % (name, unslotted_action),
+        ))
+    if not clips:
+        if not unslotted_action:
+            checks.append(Check(
+                'ERROR',
+                "%s: this preset bakes animation but nothing would be exported for "
+                "this rig (%s)" % (name, modes or "no action assigned"),
+            ))
+        return checks
 
-    a_start, a_end = action_range
-    s_start, s_end = scene_range
-    if a_start < s_start or a_end > s_end:
-        return [Check(
-            'WARNING',
-            "%s: action '%s' spans %d-%d but the scene range is %d-%d — the bake "
-            "uses the scene range, so the clip will be cut"
-            % (name, action_name, a_start, a_end, s_start, s_end),
-        )]
-    return [Check(
-        'OK',
-        "%s: action '%s' spans %d-%d, inside the scene range %d-%d"
-        % (name, action_name, a_start, a_end, s_start, s_end),
-    )]
+    if scene_range_mode and scene_range:
+        label, a_start, a_end = clips[0]
+        s_start, s_end = scene_range
+        if a_start < s_start or a_end > s_end:
+            checks.append(Check(
+                'WARNING',
+                "%s: action '%s' spans %g-%g but the scene range is %g-%g — with NLA "
+                "Strips and All Actions off the bake uses the scene range, so the "
+                "clip will be cut" % (name, label, a_start, a_end, s_start, s_end),
+            ))
+        else:
+            checks.append(Check(
+                'OK',
+                "%s: action '%s' spans %g-%g, inside the scene range %g-%g"
+                % (name, label, a_start, a_end, s_start, s_end),
+            ))
+        return checks
+
+    shown = ", ".join("%s (%g-%g)" % c for c in clips[:6])
+    if len(clips) > 6:
+        shown += " and %d more" % (len(clips) - 6)
+    checks.append(Check(
+        'OK', "%s: %d clip(s) will be exported, each over its own range: %s"
+        % (name, len(clips), shown)))
+    return checks
 
 
 def summarise(checks):
@@ -347,11 +434,115 @@ def _mesh_counts(context, obj, use_modifiers):
             pass
 
 
+def _export_scope(context, fbx):
+    """The objects the exporter will consider: selection (or the scene), narrowed by
+    Visible Objects and Active Collection the same way the exporter narrows them."""
+    objects = list(context.selected_objects) if fbx.use_selection else list(context.scene.objects)
+    if getattr(fbx, "use_visible", False):
+        objects = [o for o in objects if o.visible_get()]
+    if getattr(fbx, "use_active_collection", False):
+        collection = context.view_layer.active_layer_collection.collection
+        members = set(collection.all_objects)
+        objects = [o for o in objects if o in members]
+    return objects
+
+
+def _own_transform(obj):
+    """(scale, euler rotation, own mirror, parent mirror) as the engine receives the
+    object: from the basis matrix (rotation mode and delta transforms included), with
+    mirroring read from determinants rather than from scale signs."""
+    _loc, rotation, scale = obj.matrix_basis.decompose()
+    own_mirror = obj.matrix_basis.determinant() < 0.0
+    world_mirror = obj.matrix_world.determinant() < 0.0
+    return tuple(scale), tuple(rotation.to_euler('XYZ')), own_mirror, world_mirror != own_mirror
+
+
+def _exported_root_bones(armature, deform_only):
+    """Root bones as the exporter writes them: with Only Deform Bones it keeps deform
+    bones and the bones above them, and drops the rest (IK targets, poles, controls)."""
+    bones = armature.data.bones
+    if deform_only:
+        kept = set()
+        for bone in bones:
+            if bone.use_deform:
+                b = bone
+                while b is not None:
+                    kept.add(b.name)
+                    b = b.parent
+    else:
+        kept = {b.name for b in bones}
+    return [b.name for b in bones if b.name in kept and (b.parent is None or b.parent.name not in kept)]
+
+
+def _action_fits(action, obj):
+    """The exporter's All Actions test: an action fits when every F-curve of one of its
+    slots resolves on the object (layered actions, Blender 4.4+), or every F-curve of a
+    legacy action does."""
+    for layer in getattr(action, "layers", ()):
+        for strip in layer.strips:
+            for bag in getattr(strip, "channelbags", ()):
+                if not bag.fcurves:
+                    continue
+                try:
+                    for fc in bag.fcurves:
+                        obj.path_resolve(fc.data_path if not fc.array_index
+                                         else "%s[%d]" % (fc.data_path, fc.array_index))
+                except ValueError:
+                    continue
+                return True
+    if getattr(action, "layers", None):
+        return False
+    curves = list(getattr(action, "fcurves", ()))
+    if not curves:
+        return False
+    try:
+        for fc in curves:
+            obj.path_resolve(fc.data_path if not fc.array_index
+                             else "%s[%d]" % (fc.data_path, fc.array_index))
+    except ValueError:
+        return False
+    return True
+
+
+def _animation_clips(obj, fbx, scene_range):
+    """(clips, unslotted action name, scene-range mode, modes text) for one rig, the way
+    the FBX exporter picks its animation stacks."""
+    ad = getattr(obj, "animation_data", None)
+    action = getattr(ad, "action", None)
+    has_slots = ad is not None and hasattr(ad, "action_slot")
+    unslotted = action.name if (action is not None and has_slots and ad.action_slot is None) else None
+    nla_on = bool(getattr(fbx, "bake_anim_use_nla_strips", False))
+    all_on = bool(getattr(fbx, "bake_anim_use_all_actions", False))
+    clips = []
+    if ad is not None and nla_on:
+        for track in ad.nla_tracks:
+            if track.mute:
+                continue
+            for strip in track.strips:
+                if not strip.mute:
+                    clips.append((strip.name, strip.frame_start, strip.frame_end))
+    if ad is not None and all_on:
+        for act in bpy.data.actions:
+            if act == action:
+                if unslotted:
+                    continue
+            elif not _action_fits(act, obj):
+                continue
+            clips.append((act.name, act.frame_range[0], act.frame_range[1]))
+    scene_mode = not nla_on and not all_on
+    if scene_mode and action is not None and not unslotted:
+        clips.append((action.name, action.frame_range[0], action.frame_range[1]))
+    modes = ", ".join(m for m, on in (("NLA strips", nla_on), ("all actions", all_on)) if on)
+    modes = ("no action assigned" if scene_mode else
+             "no %s fit this rig" % modes)
+    return clips, unslotted, scene_mode, modes
+
+
 def run(context, project, preset):
     """Validate the current selection against one preset. Returns [Check]."""
     fbx = preset.fbx_settings
     from_selection = bool(fbx.use_selection)
-    objects = list(context.selected_objects) if from_selection else list(context.scene.objects)
+    objects = _export_scope(context, fbx)
 
     if not objects:
         return [Check('ERROR', "Nothing selected to export")]
@@ -400,26 +591,25 @@ def run(context, project, preset):
         considered += 1
 
         if obj.type in _TRANSFORMABLE:
-            checks.extend(check_transform(
-                obj.name, tuple(obj.scale), tuple(obj.rotation_euler), baked_on_export=baking))
+            scale, rotation, own_mirror, parent_mirror = _own_transform(obj)
+            checks.extend(check_transform(obj.name, scale, rotation, baked_on_export=baking,
+                                          own_mirror=own_mirror, parent_mirror=parent_mirror))
 
         if obj.type == 'MESH':
             polygons, uv_layers = _mesh_counts(context, obj, bool(fbx.use_mesh_modifiers))
             checks.extend(check_mesh(obj.name, polygons, uv_layers))
 
         elif obj.type == 'ARMATURE':
-            checks.extend(check_rig_facing(obj.name, obj.rotation_euler[2]))
-            roots = [b.name for b in obj.data.bones if b.parent is None]
+            scale, rotation, _own, _parent = _own_transform(obj)
+            checks.extend(check_rig_facing(obj.name, rotation[2]))
+            roots = _exported_root_bones(obj, bool(getattr(fbx, "use_armature_deform_only", False)))
             checks.extend(check_root_bones(obj.name, roots))
+            clips = []
             if wants_anim:
-                action = getattr(getattr(obj, "animation_data", None), "action", None)
-                checks.extend(check_animation(
-                    obj.name,
-                    action is not None,
-                    getattr(action, "name", ""),
-                    tuple(int(v) for v in action.frame_range) if action else None,
-                    scene_range,
-                ))
+                clips, unslotted, scene_mode, modes = _animation_clips(obj, fbx, scene_range)
+                checks.extend(check_animation(obj.name, clips, scene_range, scene_mode, unslotted, modes))
+            animated = bool(clips) or bool(getattr(getattr(obj, "animation_data", None), "action", None))
+            checks.extend(check_baked_animated_armature(obj.name, scale, animated, baking))
 
     if not considered:
         checks.append(Check(
