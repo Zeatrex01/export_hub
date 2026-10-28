@@ -840,6 +840,12 @@ def test_validator_counts_nla_only_animation():
     errors = _messages(validate.run(bpy.context, project, project.presets[2]), 'ERROR')
     _assert(not errors, "All Actions exports the pushed-down action: %s" % errors)
 
+    preset = project.presets[2]
+    preset.fbx_settings.bake_anim_use_all_actions = False
+    preset.fbx_settings.bake_anim_use_nla_strips = False
+    errors = _messages(validate.run(bpy.context, project, preset), 'ERROR')
+    _assert(not errors, "the scene-range bake evaluates the NLA too: %s" % errors)
+
 
 def test_validator_reads_rotation_modes_and_mirrors():
     import math
@@ -856,8 +862,28 @@ def test_validator_reads_rotation_modes_and_mirrors():
     _assert(any("rotation" in m and "not applied" in m for m in warnings),
             "quaternion rotation not reported: %s" % warnings)
 
-    turned = validate.check_transform("Prop", (-1.0, -1.0, 1.0), (0.0, 0.0, 0.0))
-    _assert(not _messages(turned, 'ERROR'), "(-1, -1, 1) is a turn, not a mirror: %s" % _messages(turned))
+    # Through run(), with no depsgraph update in between: the values come from the
+    # object itself, so a script that just set them is judged right too.
+    cube.rotation_mode = 'XYZ'   # Blender converts the 90° turn into the euler
+    cube.rotation_euler = (0.0, 0.0, 0.0)
+    cube.scale = (-1.0, -1.0, 1.0)
+    checks = validate.run(bpy.context, project, project.presets[0])
+    _assert(not _messages(checks, 'ERROR'), "(-1, -1, 1) is a turn, not a mirror: %s" % _messages(checks))
+    _assert(any("180° turn" in m for m in _messages(checks, 'WARNING')), _messages(checks))
+    _assert(not any("rotation is" in m for m in _messages(checks)), "no rotation was set: %s" % _messages(checks))
+
+    cube.scale = (-1.0, 1.0, 1.0)
+    checks = validate.run(bpy.context, project, project.presets[0])
+    errors = _messages(checks, 'ERROR')
+    _assert(any("(-1.000, 1.000, 1.000)" in m for m in errors), "the user's scale should be shown: %s" % errors)
+    _assert(not any("rotation is" in m for m in _messages(checks)),
+            "a mirror is not a rotation: %s" % _messages(checks))
+
+    rig = _add_rig("Rig", action_name=None)
+    rig.scale = (1.0, 1.0, -1.0)
+    _select_only([rig])
+    messages = _messages(validate.run(bpy.context, project, project.presets[1]))
+    _assert(not any("yawed" in m for m in messages), "a mirrored rig is not yawed: %s" % messages)
 
     _reset_scene()
     parent = bpy.data.objects.new("Mirror", None)

@@ -459,14 +459,44 @@ def _export_scope(context, fbx):
     return objects
 
 
+def _signed_scale(obj):
+    """The object's own scale as the user typed it, delta scale included."""
+    return tuple(a * b for a, b in zip(obj.scale, obj.delta_scale))
+
+
+def _mirrors(scale):
+    return scale[0] * scale[1] * scale[2] < 0.0
+
+
 def _own_transform(obj):
-    """(scale, euler rotation, own mirror, parent mirror) as the engine receives the
-    object: from the basis matrix (rotation mode and delta transforms included), with
-    mirroring read from determinants rather than from scale signs."""
-    _loc, rotation, scale = obj.matrix_basis.decompose()
-    own_mirror = obj.matrix_basis.determinant() < 0.0
-    world_mirror = obj.matrix_world.determinant() < 0.0
-    return tuple(scale), tuple(rotation.to_euler('XYZ')), own_mirror, world_mirror != own_mirror
+    """(scale, euler rotation, own mirror, parent mirror) as the engine receives the object.
+
+    The scale is the user's own, signs included: decomposing the matrix would turn
+    a mirror on X into scale (-1, -1, -1) plus a 180° rotation. The rotation is the
+    basis matrix with that scale divided out, so every rotation mode and delta
+    rotation counts. Mirroring is the sign of the scale's product, and a parent's
+    mirror is found by walking up the parents (their scale and the parent-inverse
+    matrix stored at parenting time). Nothing here reads matrix_world, which is
+    stale until the depsgraph updates.
+    """
+    scale = _signed_scale(obj)
+    matrix = obj.matrix_basis.to_3x3()
+    if all(abs(v) > 1e-9 for v in scale):
+        for column in range(3):
+            for row in range(3):
+                matrix[row][column] /= scale[column]
+        rotation = tuple(matrix.to_euler('XYZ'))
+    else:  # a zero scale has no rotation to recover
+        rotation = tuple(obj.rotation_euler)
+    parent_mirror = False
+    child = obj
+    while child.parent is not None:
+        if child.matrix_parent_inverse.determinant() < 0.0:
+            parent_mirror = not parent_mirror
+        child = child.parent
+        if _mirrors(_signed_scale(child)):
+            parent_mirror = not parent_mirror
+    return scale, rotation, _mirrors(scale), parent_mirror
 
 
 def _exported_root_bones(armature, deform_only):
@@ -568,6 +598,10 @@ def _animation_clips(obj, fbx, scene_range):
     scene_mode = not nla_on and not all_on
     if scene_mode and action is not None and not unslotted:
         clips.append((action.name, action.frame_range[0], action.frame_range[1]))
+    elif (scene_mode and scene_range and ad is not None
+          and any(not t.mute and any(not st.mute for st in t.strips) for t in ad.nla_tracks)):
+        # The scene-range bake evaluates the rig as it plays, NLA included.
+        clips.append(("NLA strips", scene_range[0], scene_range[1]))
     modes = ", ".join(m for m, on in (("NLA strips", nla_on), ("all actions", all_on)) if on)
     modes = ("no action assigned" if scene_mode else
              "no %s fit this rig" % modes)
