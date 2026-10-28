@@ -312,6 +312,7 @@ Note that it compares against published **Releases**, not commits or tags.
   exporter, so a version that adds or retires an option does not break the export — anything
   skipped is named on the system console.
 - Blender 4.4+ layered actions and action slots are understood by the animation checks.
+- The test suite passes on Blender 3.6.23 LTS, 4.2.0 LTS and 5.2.3 LTS (Linux).
 - Requires Blender's bundled **FBX format** add-on to be enabled (it is, by default).
 - Windows, macOS and Linux.
 
