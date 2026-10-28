@@ -132,8 +132,87 @@ def _adopt_original_names(originals, mapping, restore):
     return export_names
 
 
+# Datablock collections duplicate() can copy, depending on the user's
+# Preferences > Editing > Duplicate Data switches. Whatever the duplicate adds to
+# them is removed again on the way out.
+_DUPLICATED_DATA = ("actions", "materials", "meshes", "armatures", "curves", "lights", "cameras",
+                    "grease_pencils", "grease_pencils_v3", "lattices", "metaballs", "particles",
+                    "textures", "node_groups", "fonts", "volumes", "pointclouds", "hair_curves")
+
+
+def _data_snapshot():
+    """{collection name: set of its datablocks} for the collections above that exist."""
+    return {name: set(getattr(bpy.data, name)) for name in _DUPLICATED_DATA if hasattr(bpy.data, name)}
+
+
+def _created_since(snapshot):
+    """{collection name: [datablocks added since the snapshot]}."""
+    out = {}
+    for name, before in snapshot.items():
+        added = [d for d in getattr(bpy.data, name) if d not in before]
+        if added:
+            out[name] = added
+    return out
+
+
+def _is_animated(obj):
+    ad = getattr(obj, "animation_data", None)
+    if ad is None:
+        return False
+    return ad.action is not None or any(track.strips for track in ad.nla_tracks)
+
+
+def _share_original_data(mapping, created_data):
+    """Point each copy back at its original's actions and materials.
+
+    duplicate() copies the action by default (Duplicate Data > Action) and the
+    material when that switch is on. The copies would then reach the FBX as a
+    second clip ("Run.001", and one more per export, because All Actions exports
+    every action in the file) and as "Wood.001". The copy is a throwaway, so it
+    borrows the original's datablocks instead, and the duplicates are removed
+    before the export runs.
+    """
+    new_actions = set(created_data.get("actions", ()))
+    new_materials = set(created_data.get("materials", ()))
+    for original, copy in mapping.items():
+        src, dst = getattr(original, "animation_data", None), getattr(copy, "animation_data", None)
+        if src is not None and dst is not None:
+            if dst.action in new_actions or (dst.action is None and src.action is not None):
+                dst.action = src.action
+                if src.action is not None and hasattr(dst, "action_slot"):
+                    try:
+                        dst.action_slot = src.action_slot
+                    except (TypeError, RuntimeError):
+                        pass
+            for src_track, dst_track in zip(src.nla_tracks, dst.nla_tracks):
+                for src_strip, dst_strip in zip(src_track.strips, dst_track.strips):
+                    if dst_strip.action in new_actions:
+                        dst_strip.action = src_strip.action
+        if new_materials:
+            for src_slot, dst_slot in zip(original.material_slots, copy.material_slots):
+                if dst_slot.material in new_materials:
+                    dst_slot.material = src_slot.material
+
+
+def _remove_unused(created_data):
+    """Remove the datablocks a duplicate added that nothing uses any more."""
+    unused = []
+    for blocks in created_data.values():
+        for block in blocks:
+            try:
+                if block.users - (1 if block.use_fake_user else 0) <= 0:
+                    unused.append(block)
+            except ReferenceError:
+                pass
+    if unused:
+        try:
+            bpy.data.batch_remove(unused)
+        except (RuntimeError, TypeError) as exc:
+            print("[Export Hub] could not clear %d duplicated datablock(s) (%s)" % (len(unused), exc))
+
+
 @contextlib.contextmanager
-def _transformed_copies(context, originals):
+def _transformed_copies(context, originals, bakes_animation=False):
     """Yield [(object_to_export, name_to_use_in_filenames), ...] over baked copies.
 
     Applying transforms to the real objects is destructive and the add-on cannot
@@ -153,7 +232,21 @@ def _transformed_copies(context, originals):
     mapping = {}
     created = []
     restore_names = []
+    snapshot = _data_snapshot()
     try:
+        if bakes_animation:
+            # transform_apply rescales an armature's rest pose but not its pose-bone
+            # keys, so a scaled, animated rig would export animation that drifts
+            # away from its own mesh. Refused up front; the validator says the same.
+            for obj in originals:
+                if (obj.type == 'ARMATURE' and _is_animated(obj)
+                        and any(abs(abs(v) - 1.0) > 1e-4 for v in obj.matrix_basis.to_scale())):
+                    raise RuntimeError(
+                        "'%s' is an animated armature with scale %s — baking scale would "
+                        "make its animation drift. Apply scale before animating, or turn "
+                        "baking off for this preset"
+                        % (obj.name, tuple(round(v, 3) for v in obj.matrix_basis.to_scale())))
+
         # Duplicates inherit custom properties, and that is the only dependable way
         # to tell which copy came from which original: duplicate() returns no
         # mapping, and the generated names are not something to parse.
@@ -213,6 +306,9 @@ def _transformed_copies(context, originals):
             raise RuntimeError(
                 "could not duplicate %s for baking, so the export would have "
                 "covered only part of the selection" % shown)
+
+        _share_original_data(mapping, _created_since(snapshot))
+        _remove_unused({k: v for k, v in _created_since(snapshot).items() if k in ("actions", "materials")})
 
         # transform_apply refuses on data shared with anything else. The scope is
         # spelled out rather than left to the operator's default: any other value
@@ -281,6 +377,10 @@ def _transformed_copies(context, originals):
             except (RuntimeError, TypeError) as exc:
                 print("[Export Hub] could not clear %d baked copy datablock(s) (%s)"
                       % (len(orphans), exc))
+
+        # Anything else the duplicate created and nothing uses now (an armature's
+        # data, a duplicated node group, a leftover action) goes too.
+        _remove_unused(_created_since(snapshot))
 
         # Only now, with the copies and their data gone, is the name free.
         for datablock, name in reversed(restore_names):
@@ -555,7 +655,8 @@ def _run_export(context, project, preset, export_dir_override=None, save=True):
 
     try:
         if on_copies:
-            with _transformed_copies(context, list(context.selected_objects)) as plan:
+            with _transformed_copies(context, list(context.selected_objects),
+                                     bakes_animation=bool(fbx.bake_anim)) as plan:
                 status, message, folder = _export(plan)
         else:
             status, message, folder = _export(None)
