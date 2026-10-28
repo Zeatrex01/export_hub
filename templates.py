@@ -115,9 +115,16 @@ TEMPLATES = (
             # the mesh data, and is safe here because there is no armature.
             "bake_space_transform": True,
             "apply_scale_options": "FBX_SCALE_UNITS",
-            "use_tspace": True,
+            # Unity recalculates tangents on import (Tangents: Calculate
+            # Mikktspace) unless told to import them, so writing them only adds
+            # size, and a warning on every mesh with n-gons.
+            "use_tspace": False,
         }),
-        notes="",
+        notes="Apply Transform is on, so the root arrives with rotation 0. If "
+              "this model is already placed in scenes from an export with it "
+              "off, the scenes keep the old -90 X root rotation and the placed "
+              "copies lie down after re-exporting: keep the setting the model "
+              "was first exported with, or fix the placed copies.",
     ),
     Template(
         id="unity_skeletal",
@@ -129,7 +136,7 @@ TEMPLATES = (
             # Deliberately off: baking the transform breaks armatures.
             "bake_space_transform": False,
             "apply_scale_options": "FBX_SCALE_UNITS",
-            "use_tspace": True,
+            "use_tspace": False,  # Unity recalculates tangents, see Static Mesh
         }),
         notes="Apply Transform stays off for rigs, so the mesh and rig nodes "
               "carry -90 on X in Unity: that is normal and the character still "
@@ -146,6 +153,7 @@ TEMPLATES = (
         settings=_merge(_ANIM_SETTINGS, {
             "apply_scale_options": "FBX_SCALE_UNITS",
             "bake_space_transform": False,
+            "use_tspace": False,
         }),
         notes="Exports the armature without mesh data. Pair it with a "
               "Skeletal Mesh export of the same rig.",
@@ -161,9 +169,12 @@ TEMPLATES = (
             "apply_scale_options": "FBX_SCALE_NONE",
             "use_tspace": True,
         }),
-        notes="VERIFY: Unreal works in centimetres (1 uu = 1 cm) while Blender "
-              "works in metres. This exports at scale 1.0; set Import Uniform "
-              "Scale to 100 in Unreal, or author your scene in centimetres.",
+        # All Local (FBX_SCALE_NONE) writes a centimetre file and puts the
+        # metre-to-centimetre factor on the root as scale 100 (measured in 5.2).
+        notes="VERIFY: Unreal works in centimetres (1 uu = 1 cm). With the scene "
+              "Unit Scale at 1.0 this export writes centimetres, so the mesh "
+              "arrives at its real size with Import Uniform Scale left at 1.0; "
+              "setting it to 100 makes it 100 times too big.",
     ),
     Template(
         id="unreal_skeletal",

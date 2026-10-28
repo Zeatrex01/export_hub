@@ -445,6 +445,19 @@ def test_startup_update_timer_survives_loading_a_file():
             "Blender drops non-persistent timers when the startup file loads")
 
 
+def test_template_notes_and_settings():
+    from export_hub import templates
+    unreal = templates.get("unreal_static")
+    _assert("Uniform Scale to 100" not in unreal.notes,
+            "All Local already writes centimetres; Import Uniform Scale 100 makes it 100x too big")
+    unity_static = templates.get("unity_static")
+    _assert("placed" in unity_static.notes,
+            "Unity Static should warn that toggling Apply Transform lays placed copies down")
+    for template in templates.for_engine("Unity"):
+        _assert(template.settings.get("use_tspace") is False,
+                "%s: Unity recalculates tangents on import" % template.id)
+
+
 def test_filename_sanitising():
     from export_hub import config
     _assert(config.sanitize_filename("a/b:c*d") == "a_b_c_d",
