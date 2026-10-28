@@ -672,6 +672,13 @@ def test_baked_copy_exports_one_clip_and_leaks_nothing():
             _assert(sorted(a.name for a in bpy.data.actions) == ["Run"],
                     "duplicated actions left behind: %s" % [a.name for a in bpy.data.actions])
         _assert(rig.animation_data.action.name == "Run", "original rig lost its action")
+        _assert(edit.use_duplicate_action, "the user's Duplicate Data > Action was not put back")
+        from export_hub import operators
+        bpy.context.preferences.is_dirty = False
+        with operators._duplicates_share_animation_and_materials(bpy.context):
+            _assert(not edit.use_duplicate_action, "copies should share the action")
+        _assert(edit.use_duplicate_action and not bpy.context.preferences.is_dirty,
+                "borrowing the preference must leave it, and the unsaved flag, as they were")
     finally:
         edit.use_duplicate_action = old
 
@@ -717,6 +724,67 @@ def test_scaled_animated_rig_bake_is_refused():
     _assert(result != {"FINISHED"}, "export should be refused")
     _assert(not os.listdir(out), "nothing should be written: %s" % os.listdir(out))
     _assert(tuple(rig.scale) == (2.0, 2.0, 2.0), "original rig was modified")
+
+
+def _animation_bake_project(prefix):
+    out = tempfile.mkdtemp(prefix=prefix)
+    project = _make_project_from_engine("Unity", out, filename_template="{preset}")
+    project.active_preset_index = 2
+    preset = project.presets[2]
+    preset.apply_transform_before_export = True
+    return out, project, preset
+
+
+def test_baked_copy_of_a_rig_in_nla_tweak_mode():
+    _reset_scene()
+    rig = _add_rig("Rig")
+    ad = rig.animation_data
+    track = ad.nla_tracks.new()
+    strip = track.strips.new("Run", 1, ad.action)
+    ad.action = None
+    track.select = True
+    strip.select = True
+    ad.nla_tracks.active = track
+    ad.use_tweak_mode = True
+    _assert(ad.use_tweak_mode, "test setup: tweak mode did not start")
+    out, project, preset = _animation_bake_project("exh_tweak_")
+    _select_only([rig])
+    result = _call(bpy.ops.export_hub.export)
+    _assert(result == {"FINISHED"}, "baked export in tweak mode failed: %s" % (result,))
+    _assert(sorted(a.name for a in bpy.data.actions) == ["Run"],
+            "duplicated actions left behind: %s" % [a.name for a in bpy.data.actions])
+    _assert(rig.animation_data.use_tweak_mode, "the user's tweak mode was changed")
+
+
+def test_bake_refuses_rigs_that_would_drift():
+    from export_hub import validate
+    # Scale inherited from a selected parent drifts just like the rig's own scale.
+    _reset_scene()
+    holder = bpy.data.objects.new("Holder", None)
+    bpy.context.collection.objects.link(holder)
+    holder.scale = (2.0, 2.0, 2.0)
+    rig = _add_rig("Rig")
+    rig.parent = holder
+    bpy.context.view_layer.update()
+    out, project, preset = _animation_bake_project("exh_drift_parent_")
+    _select_only([rig, holder])
+    errors = _messages(validate.run(bpy.context, project, preset), 'ERROR')
+    _assert(any("drift" in m for m in errors), "validator missed the inherited scale: %s" % errors)
+    _assert(_call(bpy.ops.export_hub.export) != {"FINISHED"}, "inherited-scale rig was baked")
+    _assert(not os.listdir(out), os.listdir(out))
+
+    # An unassigned action that All Actions exports is animation too.
+    _reset_scene()
+    rig = _add_rig("Rig")
+    rig.animation_data.action.use_fake_user = True
+    rig.animation_data.action = None
+    rig.scale = (2.0, 2.0, 2.0)
+    out, project, preset = _animation_bake_project("exh_drift_all_")
+    _select_only([rig])
+    errors = _messages(validate.run(bpy.context, project, preset), 'ERROR')
+    _assert(any("drift" in m for m in errors), errors)
+    _assert(_call(bpy.ops.export_hub.export) != {"FINISHED"}, "All Actions rig was baked")
+    _assert(not os.listdir(out), os.listdir(out))
 
 
 def test_validator_follows_all_actions_range():

@@ -4,6 +4,7 @@ import os
 import json
 import datetime
 import contextlib
+import types
 
 import bpy
 from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty
@@ -162,43 +163,31 @@ def _created_since(snapshot):
     return out
 
 
-def _is_animated(obj):
-    ad = getattr(obj, "animation_data", None)
-    if ad is None:
-        return False
-    return ad.action is not None or any(track.strips for track in ad.nla_tracks)
+@contextlib.contextmanager
+def _duplicates_share_animation_and_materials(context):
+    """Let duplicate() share actions and materials with the originals.
 
-
-def _share_original_data(mapping, created_data):
-    """Point each copy back at its original's actions and materials.
-
-    duplicate() copies the action by default (Duplicate Data > Action) and the
-    material when that switch is on. The copies would then reach the FBX as a
-    second clip ("Run.001", and one more per export, because All Actions exports
-    every action in the file) and as "Wood.001". The copy is a throwaway, so it
-    borrows the original's datablocks instead, and the duplicates are removed
-    before the export runs.
+    Duplicate Data > Action is on by default (Material optionally), and copied
+    actions reach the FBX as a second clip ("Run.001", one more per export, since
+    All Actions exports every action in the file) and copied materials as
+    "Wood.001". The copies are throwaways, so they borrow the originals' data.
+    Switching the preference off for the one call is also the only way that works
+    in NLA tweak mode, where a copy's action cannot be reassigned afterwards. The
+    preferences, and whether they count as changed, are put back.
     """
-    new_actions = set(created_data.get("actions", ()))
-    new_materials = set(created_data.get("materials", ()))
-    for original, copy in mapping.items():
-        src, dst = getattr(original, "animation_data", None), getattr(copy, "animation_data", None)
-        if src is not None and dst is not None:
-            if dst.action in new_actions or (dst.action is None and src.action is not None):
-                dst.action = src.action
-                if src.action is not None and hasattr(dst, "action_slot"):
-                    try:
-                        dst.action_slot = src.action_slot
-                    except (TypeError, RuntimeError):
-                        pass
-            for src_track, dst_track in zip(src.nla_tracks, dst.nla_tracks):
-                for src_strip, dst_strip in zip(src_track.strips, dst_track.strips):
-                    if dst_strip.action in new_actions:
-                        dst_strip.action = src_strip.action
-        if new_materials:
-            for src_slot, dst_slot in zip(original.material_slots, copy.material_slots):
-                if dst_slot.material in new_materials:
-                    dst_slot.material = src_slot.material
+    preferences = context.preferences
+    edit = preferences.edit
+    saved = {name: getattr(edit, name)
+             for name in ("use_duplicate_action", "use_duplicate_material") if hasattr(edit, name)}
+    was_dirty = preferences.is_dirty
+    try:
+        for name in saved:
+            setattr(edit, name, False)
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(edit, name, value)
+        preferences.is_dirty = was_dirty
 
 
 def _remove_unused(created_data):
@@ -219,7 +208,7 @@ def _remove_unused(created_data):
 
 
 @contextlib.contextmanager
-def _transformed_copies(context, originals, bakes_animation=False):
+def _transformed_copies(context, originals, anim_settings=None):
     """Yield [(object_to_export, name_to_use_in_filenames), ...] over baked copies.
 
     Applying transforms to the real objects is destructive and the add-on cannot
@@ -233,6 +222,9 @@ def _transformed_copies(context, originals, bakes_animation=False):
 
     The copies take over their originals' names before the export runs, so the
     engine sees `Chair`, not the `Chair.001` that duplicate() minted.
+
+    anim_settings are the FBX settings when the export bakes animation (anything
+    with the exporter's bake_anim_* attributes), None otherwise.
     """
     previous_active = context.view_layer.objects.active
     originals_set = set(originals)
@@ -241,18 +233,19 @@ def _transformed_copies(context, originals, bakes_animation=False):
     restore_names = []
     snapshot = _data_snapshot()
     try:
-        if bakes_animation:
+        if anim_settings is not None:
             # transform_apply rescales an armature's rest pose but not its pose-bone
             # keys, so a scaled, animated rig would export animation that drifts
             # away from its own mesh. Refused up front; the validator says the same.
+            scene_range = (context.scene.frame_start, context.scene.frame_end)
             for obj in originals:
-                if (obj.type == 'ARMATURE' and _is_animated(obj)
-                        and any(abs(abs(v) - 1.0) > 1e-4 for v in obj.matrix_basis.to_scale())):
+                scale = validate.drifting_scale(obj, anim_settings, scene_range)
+                if scale is not None:
                     raise RuntimeError(
                         "'%s' is an animated armature with scale %s — baking scale would "
                         "make its animation drift. Apply scale before animating, or turn "
                         "baking off for this preset"
-                        % (obj.name, tuple(round(v, 3) for v in obj.matrix_basis.to_scale())))
+                        % (obj.name, tuple(round(v, 3) for v in scale)))
 
         # Duplicates inherit custom properties, and that is the only dependable way
         # to tell which copy came from which original: duplicate() returns no
@@ -282,7 +275,8 @@ def _transformed_copies(context, originals, bakes_animation=False):
             previous_active if previous_active in originals_set else originals[0])
 
         try:
-            bpy.ops.object.duplicate(linked=False)
+            with _duplicates_share_animation_and_materials(context):
+                bpy.ops.object.duplicate(linked=False)
         except RuntimeError as exc:
             raise RuntimeError("could not duplicate the selection for baking (%s)" % exc)
 
@@ -313,9 +307,6 @@ def _transformed_copies(context, originals, bakes_animation=False):
             raise RuntimeError(
                 "could not duplicate %s for baking, so the export would have "
                 "covered only part of the selection" % shown)
-
-        _share_original_data(mapping, _created_since(snapshot))
-        _remove_unused({k: v for k, v in _created_since(snapshot).items() if k in ("actions", "materials")})
 
         # transform_apply refuses on data shared with anything else. The scope is
         # spelled out rather than left to the operator's default: any other value
@@ -699,7 +690,7 @@ def _run_export(context, project, preset, export_dir_override=None, save=True):
     try:
         if on_copies:
             with _transformed_copies(context, list(context.selected_objects),
-                                     bakes_animation=bool(fbx.bake_anim)) as plan:
+                                     anim_settings=fbx if fbx.bake_anim else None) as plan:
                 status, message, folder = _export(plan)
         else:
             status, message, folder = _export(None)
@@ -1218,7 +1209,8 @@ def _reexport(context, filepath, kwargs, names, baked):
             obj.select_set(True)
         context.view_layer.objects.active = objects[0]
         if baked:
-            with _transformed_copies(context, objects, bakes_animation=bool(kwargs.get("bake_anim"))):
+            settings = types.SimpleNamespace(**kwargs) if kwargs.get("bake_anim") else None
+            with _transformed_copies(context, objects, anim_settings=settings):
                 return _export_fbx(context, filepath, kwargs)
         return _export_fbx(context, filepath, kwargs)
     except RuntimeError as exc:

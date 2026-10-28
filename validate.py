@@ -516,6 +516,30 @@ def _action_fits(action, obj):
     return True
 
 
+def _is_animated(obj):
+    ad = getattr(obj, "animation_data", None)
+    return ad is not None and (ad.action is not None or any(t.strips for t in ad.nla_tracks))
+
+
+def drifting_scale(obj, fbx, scene_range):
+    """World scale of an armature that baking would break, or None.
+
+    transform_apply rescales the rest pose but not the bone keys, so an animated
+    rig whose scale is not 1 — its own, or inherited from a parent — drifts away
+    from its mesh. Animated means the export would bake something for it: an
+    assigned action, NLA strips, or an action All Actions picks up. A mirror
+    (scale -1) bakes cleanly and is not counted.
+    """
+    if obj.type != 'ARMATURE':
+        return None
+    scale = tuple(obj.matrix_world.to_scale())
+    if all(abs(abs(s) - 1.0) <= _SCALE_TOLERANCE for s in scale):
+        return None
+    if not (_is_animated(obj) or _animation_clips(obj, fbx, scene_range)[0]):
+        return None
+    return scale
+
+
 def _animation_clips(obj, fbx, scene_range):
     """(clips, unslotted action name, scene-range mode, modes text) for one rig, the way
     the FBX exporter picks its animation stacks."""
@@ -624,8 +648,9 @@ def run(context, project, preset):
             if wants_anim:
                 clips, unslotted, scene_mode, modes = _animation_clips(obj, fbx, scene_range)
                 checks.extend(check_animation(obj.name, clips, scene_range, scene_mode, unslotted, modes))
-            animated = bool(clips) or bool(getattr(getattr(obj, "animation_data", None), "action", None))
-            checks.extend(check_baked_animated_armature(obj.name, scale, animated, baking))
+            drift = drifting_scale(obj, fbx, scene_range) if wants_anim else None
+            checks.extend(check_baked_animated_armature(obj.name, drift or (1.0, 1.0, 1.0),
+                                                        drift is not None, baking))
 
     if not considered:
         checks.append(Check(
